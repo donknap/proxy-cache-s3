@@ -6,78 +6,111 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/url"
+	"regexp"
+	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
+var reservedObjectNames = regexp.MustCompile("^[a-zA-Z0-9-_.~/]+$")
+
 // GeneratePresignedURL 生成一个 AWS S3 预签名 URL
-func GeneratePresignedURL(accessKey, secretKey, sessionToken, region, host, bucket, key string, expires time.Duration, versionID string) (string, error) {
-	method := "GET"
-	service := "s3"
+func GeneratePresignedURL(accessKey, secretKey, sessionToken, region, host, bucket, key string, method string, expires time.Duration, versionID string) (string, error) {
+	signV4Algorithm := "AWS4-HMAC-SHA256"
+	iso8601DateFormat := "20060102T150405Z"
+	yyyymmdd := "20060102"
+	ServiceTypeS3 := "s3"
+
+	// 生成当前时间
+	t := time.Now().UTC()
+	credentialDate := t.Format("20060102")
+
 	endpoint := fmt.Sprintf("https://%s/%s%s", host, bucket, key)
 	parsedURL, err := url.Parse(endpoint)
 	if err != nil {
 		return "", err
 	}
 
-	// 生成当前时间
-	t := time.Now().UTC()
-	amzDate := t.Format("20060102T150405Z")
-	credentialDate := t.Format("20060102")
-	expiry := t.Add(expires).UTC()
-	iso8601Expiry := expiry.Format("20060102T150405Z")
-
 	// 构建 Canonical Request
-	canonicalURI := fmt.Sprintf("/%s/%s", bucket, key)
-	canonicalQueryString := parsedURL.Query().Encode()
-	canonicalHeaders := fmt.Sprintf("host:%s\n", host)
+	credential := fmt.Sprintf("%s/%s/%s/%s/aws4_request", accessKey, credentialDate, region, ServiceTypeS3)
 	signedHeaders := "host"
-	payloadHash := "UNSIGNED-PAYLOAD"
+	query := parsedURL.Query()
+	query.Set("X-Amz-Algorithm", signV4Algorithm)
+	query.Set("X-Amz-Date", t.Format(iso8601DateFormat))
+	query.Set("X-Amz-Expires", strconv.FormatInt(int64(expires/time.Second), 10))
+	query.Set("X-Amz-SignedHeaders", signedHeaders)
+	query.Set("X-Amz-Credential", credential)
+	if sessionToken != "" {
+		query.Set("X-Amz-Security-Token", sessionToken)
+	}
+	// 如果有 versionID，添加到 URL
+	if versionID != "" {
+		query.Set("versionId", url.QueryEscape(versionID))
+	}
+	rawQuery := query.Encode()
+	rawQuery = strings.ReplaceAll(rawQuery, "+", "%20")
 
-	canonicalRequest := fmt.Sprintf("%s\n%s\n%s\n%s\n%s\n%s",
-		method,
-		canonicalURI,
-		canonicalQueryString,
+	canonicalHeaders := fmt.Sprintf("host:%s\n", host)
+	payloadHash := "UNSIGNED-PAYLOAD"
+	canonicalRequest := strings.Join([]string{
+		strings.ToUpper(method),
+		encodePath(parsedURL.Path),
+		rawQuery,
 		canonicalHeaders,
 		signedHeaders,
-		payloadHash)
+		payloadHash,
+	}, "\n")
 
-	canonicalRequestHash := hashSHA256(canonicalRequest)
-
-	// 构建 String to Sign
-	stringToSign := fmt.Sprintf("AWS4-HMAC-SHA256\n%s\n%s/%s/%s/aws4_request\n%s",
-		amzDate,
-		credentialDate,
+	scope := strings.Join([]string{
+		t.Format(yyyymmdd),
 		region,
-		service,
-		canonicalRequestHash)
+		ServiceTypeS3,
+		"aws4_request",
+	}, "/")
+	stringToSign := signV4Algorithm + "\n" + t.Format(iso8601DateFormat) + "\n"
+	stringToSign = stringToSign + scope + "\n"
+	stringToSign += hashSHA256(canonicalRequest)
 
-	signingKey := getSignatureKey(secretKey, credentialDate, region, service)
+	signingKey := getSignatureKey(secretKey, credentialDate, region, ServiceTypeS3)
 	signature := hmacSHA256(signingKey, stringToSign)
 	signatureHex := hex.EncodeToString(signature)
 
 	// 构建预签名 URL
-	presignedURL := fmt.Sprintf("%s?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=%s%%2F%s%%2F%s%%2F%s%%2Faws4_request&X-Amz-Date=%s&X-Amz-Expires=%d&X-Amz-SignedHeaders=%s&X-Amz-Signature=%s",
-		endpoint,
-		url.QueryEscape(accessKey),
-		credentialDate,
-		region,
-		service,
-		iso8601Expiry,
-		int(expires.Seconds()),
-		signedHeaders,
-		signatureHex)
+	parsedURL.RawQuery = rawQuery + "&X-Amz-Signature=" + signatureHex
 
-	// 如果有 sessionToken，添加到 URL
-	if sessionToken != "" {
-		presignedURL += fmt.Sprintf("&X-Amz-Security-Token=%s", url.QueryEscape(sessionToken))
+	return parsedURL.String(), nil
+}
+
+func encodePath(pathName string) string {
+	if reservedObjectNames.MatchString(pathName) {
+		return pathName
 	}
-
-	// 如果有 versionID，添加到 URL
-	if versionID != "" {
-		presignedURL += fmt.Sprintf("&versionId=%s", url.QueryEscape(versionID))
+	var encodedPathname strings.Builder
+	for _, s := range pathName {
+		if 'A' <= s && s <= 'Z' || 'a' <= s && s <= 'z' || '0' <= s && s <= '9' { // §2.3 Unreserved characters (mark)
+			encodedPathname.WriteRune(s)
+			continue
+		}
+		switch s {
+		case '-', '_', '.', '~', '/': // §2.3 Unreserved characters (mark)
+			encodedPathname.WriteRune(s)
+			continue
+		default:
+			l := utf8.RuneLen(s)
+			if l < 0 {
+				// if utf8 cannot convert return the same string as is
+				return pathName
+			}
+			u := make([]byte, l)
+			utf8.EncodeRune(u, s)
+			for _, r := range u {
+				hex := hex.EncodeToString([]byte{r})
+				encodedPathname.WriteString("%" + strings.ToUpper(hex))
+			}
+		}
 	}
-
-	return presignedURL, nil
+	return encodedPathname.String()
 }
 
 // hashSHA256 对输入字符串进行 SHA256 哈希
