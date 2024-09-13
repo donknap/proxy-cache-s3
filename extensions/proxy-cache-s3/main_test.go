@@ -38,3 +38,10 @@ func TestS3(t *testing.T) {
 
 	fmt.Println("Presigned URL:", url)
 }
+
+func TestGetPath(t *testing.T) {
+	path := util.GetPath([]string{
+		"abc", "def", "123",
+	})
+	fmt.Printf("%v \n", path)
+}

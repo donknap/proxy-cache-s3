@@ -48,12 +48,12 @@ static_resources:
                     value: |
                       {
                         "cache_ttl": "30s",
-                        "cache_header": true,
-                        "s3_secret_id": "CLLXCjkzzLgNLE4PPqk1",
-                        "s3_secret_key": "iPmmjjqxzIb54DAyRSBIibURuA5ionSV09NM409a",
-                        "s3_region": "3333",
-                        "s3_bucket": "proxy-cache",
-                        "s3_endpoint": "55555"
+                        "cache_header": "true",
+                        "access_key": "CLLXCjkzzLgNLE4PPqk1",
+                        "secret_key": "iPmmjjqxzIb54DAyRSBIibURuA5ionSV09NM409a",
+                        "region": "cn-beijing",
+                        "bucket": "proxy-cache",
+                        "host": "s3.test.w7.com"
                       }
           - name: envoy.filters.http.router
   clusters:

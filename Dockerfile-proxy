@@ -1,0 +1,2 @@
+FROM scratch
+COPY ./extensions/proxy-cache-s3/plugin.wasm plugin.wasm

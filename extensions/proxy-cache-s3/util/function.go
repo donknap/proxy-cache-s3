@@ -59,3 +59,24 @@ func GetCacheKey(str string) string {
 	hashString := hex.EncodeToString(hashBytes)
 	return hashString
 }
+
+func InArray[T uint32 | string](v []T, item T) bool {
+	if v == nil {
+		return false
+	}
+	for _, t := range v {
+		if t == item {
+			return true
+		}
+	}
+	return false
+}
+
+func GetPath(cacheKey []string) string {
+	path := make([]string, 0)
+	key := strings.Split(GetCacheKey(strings.Join(cacheKey, "-")), "")
+	for i := 0; i < len(key); i += 2 {
+		path = append(path, strings.Join(key[i:i+2], ""))
+	}
+	return strings.Join(path, "/")
+}

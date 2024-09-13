@@ -6,8 +6,8 @@ import (
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/tidwall/gjson"
-	"net/http"
 	"strings"
+	"time"
 )
 
 const (
@@ -28,6 +28,7 @@ func main() {
 		"w7-proxy-cache",
 		wrapper.ParseConfigBy(parseConfig),
 		wrapper.ProcessRequestHeadersBy(onHttpRequestHeaders),
+		wrapper.ProcessResponseBodyBy(onHttpResponseBody),
 	)
 }
 
@@ -37,11 +38,11 @@ type W7ProxyCache struct {
 	setting  struct {
 		cacheTTL    string
 		cacheHeader bool
-		s3SecretId  string
-		s3SecretKey string
-		s3Region    string
-		s3Bucket    string
-		s3Endpoint  string
+		accessKey   string
+		secretKey   string
+		region      string
+		bucket      string
+		host        string
 	}
 }
 
@@ -69,29 +70,29 @@ func parseConfig(json gjson.Result, config *W7ProxyCache, log wrapper.Log) error
 		}
 	}
 
-	if json.Get("s3_secret_id").Exists() {
-		value := json.Get("s3_secret_id").String()
-		config.setting.s3SecretId = strings.Replace(value, " ", "", -1)
+	if json.Get("access_key").Exists() {
+		value := json.Get("access_key").String()
+		config.setting.accessKey = strings.Replace(value, " ", "", -1)
 	}
 
-	if json.Get("s3_secret_key").Exists() {
-		value := json.Get("s3_secret_key").String()
-		config.setting.s3SecretKey = strings.Replace(value, " ", "", -1)
+	if json.Get("secret_key").Exists() {
+		value := json.Get("secret_key").String()
+		config.setting.secretKey = strings.Replace(value, " ", "", -1)
 	}
 
-	if json.Get("s3_region").Exists() {
-		value := json.Get("s3_region").String()
-		config.setting.s3Region = strings.Replace(value, " ", "", -1)
+	if json.Get("region").Exists() {
+		value := json.Get("region").String()
+		config.setting.region = strings.Replace(value, " ", "", -1)
 	}
 
-	if json.Get("s3_bucket").Exists() {
-		value := json.Get("s3_bucket").String()
-		config.setting.s3Bucket = strings.Replace(value, " ", "", -1)
+	if json.Get("bucket").Exists() {
+		value := json.Get("bucket").String()
+		config.setting.bucket = strings.Replace(value, " ", "", -1)
 	}
 
-	if json.Get("s3_endpoint").Exists() {
-		value := json.Get("s3_endpoint").String()
-		config.setting.s3Endpoint = strings.Replace(value, " ", "", -1)
+	if json.Get("host").Exists() {
+		value := json.Get("host").String()
+		config.setting.host = strings.Replace(value, " ", "", -1)
 	}
 
 	if config.setting.cacheTTL == "" {
@@ -99,11 +100,11 @@ func parseConfig(json gjson.Result, config *W7ProxyCache, log wrapper.Log) error
 		return types.ErrorStatusBadArgument
 	}
 
-	if config.setting.s3SecretId == "" ||
-		config.setting.s3SecretKey == "" ||
-		config.setting.s3Region == "" ||
-		config.setting.s3Bucket == "" ||
-		config.setting.s3Endpoint == "" {
+	if config.setting.accessKey == "" ||
+		config.setting.secretKey == "" ||
+		config.setting.region == "" ||
+		config.setting.bucket == "" ||
+		config.setting.host == "" {
 		log.Error("s3 setting is empty")
 		return types.ErrorStatusBadArgument
 	}
@@ -138,29 +139,71 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 		cacheKeyList = append(cacheKeyList, cacheKey)
 	}
 	cacheKey := util.GetCacheKey(strings.Join(cacheKeyList, "-"))
+	log.Errorf("request cache key: %s", cacheKey)
+	return types.ActionContinue
+}
 
-	// 使用client的Get方法发起HTTP Get调用，此处省略了timeout参数，默认超时时间500毫秒
-	config.client.Get("/", nil,
-		// 回调函数，将在响应异步返回时被执行
-		func(statusCode int, responseHeaders http.Header, responseBody []byte) {
-			// 请求没有返回200状态码，进行处理
-			if statusCode != http.StatusOK {
-				log.Errorf("http call failed, status: %d", statusCode)
-				proxywasm.SendHttpResponse(http.StatusInternalServerError, nil,
-					[]byte("http call failed"), -1)
-				return
-			}
-			// 打印响应的HTTP状态码和应答body
-			log.Infof("get status: %d, response body: %s", statusCode, responseBody)
-			// 从应答头中解析token字段设置到原始请求头中
-			// 恢复原始请求流程，继续往下处理，才能正常转发给后端服务
-			proxywasm.ResumeHttpRequest()
-		})
+func onHttpResponseBody(ctx wrapper.HttpContext, config W7ProxyCache, body []byte, log wrapper.Log) types.Action {
+	//status, err := proxywasm.GetHttpResponseHeader("status")
+	//log.Infof("response status %s", status)
+	//if err != nil {
+	//	log.Errorf("parse response status code failed %s", err.Error())
+	//	return types.ActionContinue
+	//}
+	//// convert status code to uint32
+	//statusCode, err := strconv.Atoi(status)
+	//if err != nil {
+	//	log.Errorf("convert status code to uint32 failed: %v", err)
+	//	return types.ActionContinue
+	//}
+	//if !util.InArray([]uint32{
+	//	200,
+	//}, uint32(statusCode)) {
+	//	return types.ActionContinue
+	//}
+	//// if request method is not GET or HEAD, do not cache it
+	//if !util.InArray([]string{
+	//	"GET", "HEAD",
+	//}, ctx.Method()) {
+	//	return types.ActionContinue
+	//}
+	//// check actual cache key
+	//if len(config.cacheKey) == 0 {
+	//	log.Error("actual cache key is empty")
+	//	return types.ActionContinue
+	//}
+	log.Error(string(body))
 
-	proxywasm.SendHttpResponseWithDetail(http.StatusOK, "hello-world", [][2]string{
-		{
-			"Hello", "World",
-		},
-	}, []byte("hello world 324234234234 \n"+cacheKey), -1)
-	return types.ActionPause
+	url, err := util.GeneratePresignedURL(
+		config.setting.accessKey,
+		config.setting.secretKey,
+		"",
+		config.setting.region,
+		config.setting.host,
+		config.setting.bucket,
+		util.GetPath(config.cacheKey),
+		"put",
+		1*time.Hour,
+		"",
+	)
+	if err != nil {
+		log.Errorf("make s3 url failed: %v", err)
+		return types.ActionContinue
+	}
+	log.Infof("put s3 path: %s", url)
+	//err = config.client.Put(url, nil, body,
+	//	func(statusCode int, responseHeaders http.Header, responseBody []byte) {
+	//		if statusCode != http.StatusOK {
+	//			log.Errorf("put s3 error: %d %s", statusCode, url)
+	//		} else {
+	//			log.Infof("put s3 success: %d, response body: %s", statusCode, responseBody)
+	//		}
+	//		proxywasm.ResumeHttpRequest()
+	//	},
+	//)
+	//if err != nil {
+	//	log.Errorf("cache response body failed: %v", err)
+	//	return types.ActionContinue
+	//}
+	return types.ActionContinue
 }
