@@ -26,7 +26,7 @@ func GeneratePresignedURL(accessKey, secretKey, sessionToken, region, host, buck
 	t := time.Now().UTC()
 	credentialDate := t.Format("20060102")
 
-	endpoint := fmt.Sprintf("https://%s/%s%s", host, bucket, key)
+	endpoint := fmt.Sprintf("http://%s/%s%s", host, bucket, key)
 	parsedURL, err := url.Parse(endpoint)
 	if err != nil {
 		return "", err
