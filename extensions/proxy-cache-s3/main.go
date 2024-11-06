@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
 	"github.com/donknap/proxy-cache-s3/util"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
@@ -125,7 +124,6 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 	ctx.SetContext("req_path", ctx.Path())
 
 	log.Errorf("onHttpRequestHeaders check s3 path: %s", ctx.Path())
-	log.Errorf("onHttpRequestHeaders check s3 remote path : %s", checkExistsUrl)
 	err = config.client.Get(checkExistsUrl, nil, func(statusCode int, responseHeaders http.Header, responseBody []byte) {
 		exists := false
 		if statusCode == 200 {
@@ -195,15 +193,6 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wra
 
 		ctx.SetContext("remote_file_content_type", content)
 	}
-	headers := ""
-	list, err := proxywasm.GetHttpResponseHeaders()
-	if err == nil {
-		for i := range list {
-			headers += fmt.Sprintf("%s:%s\n", list[i][0], list[i][1])
-		}
-	}
-
-	log.Errorf("onHttpResponseHeaders complete %s，%s, %s", ctx.GetStringContext("req_path", ""), status, headers)
 
 	return types.ActionContinue
 }
