@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
 	"github.com/donknap/proxy-cache-s3/util"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
@@ -38,19 +39,6 @@ type W7ProxyCache struct {
 }
 
 func parseConfig(json gjson.Result, config *W7ProxyCache, log wrapper.Log) error {
-	urlServiceInfo := strings.Replace("", ".svc.cluster.local", config.setting.host, 1)
-	urlServiceInfoArr := strings.Split(urlServiceInfo, ".")
-	if len(urlServiceInfoArr) != 2 {
-		log.Errorf("invalid host: %s", config.setting.host)
-		return types.ErrorStatusBadArgument
-	}
-	config.client = wrapper.NewClusterClient(wrapper.K8sCluster{
-		Port:        80,
-		Version:     "",
-		ServiceName: urlServiceInfoArr[0],
-		Namespace:   urlServiceInfoArr[1],
-	})
-
 	// get cache ttl
 	if json.Get("cache_ttl").Exists() {
 		cacheTTL := json.Get("cache_ttl").Int()
@@ -97,6 +85,19 @@ func parseConfig(json gjson.Result, config *W7ProxyCache, log wrapper.Log) error
 		config.setting.port = 80
 	}
 
+	urlServiceInfo := strings.Replace(config.setting.host, ".svc.cluster.local", "", 1)
+	urlServiceInfoArr := strings.Split(urlServiceInfo, ".")
+	if len(urlServiceInfoArr) != 2 {
+		log.Errorf("invalid host: %s", config.setting.host)
+		return types.ErrorStatusBadArgument
+	}
+	config.client = wrapper.NewClusterClient(wrapper.K8sCluster{
+		Port:        80,
+		Version:     "",
+		ServiceName: urlServiceInfoArr[0],
+		Namespace:   urlServiceInfoArr[1],
+	})
+
 	return nil
 }
 
@@ -121,9 +122,10 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 		log.Errorf("onHttpRequestHeaders make s3 check url failed: %v", err)
 		return types.ActionContinue
 	}
+	ctx.SetContext("req_path", ctx.Path())
 
-	log.Infof("onHttpRequestHeaders check s3 path: %s", ctx.Path())
-	log.Infof("onHttpRequestHeaders check s3 remote path : %s", checkExistsUrl)
+	log.Errorf("onHttpRequestHeaders check s3 path: %s", ctx.Path())
+	log.Errorf("onHttpRequestHeaders check s3 remote path : %s", checkExistsUrl)
 	err = config.client.Get(checkExistsUrl, nil, func(statusCode int, responseHeaders http.Header, responseBody []byte) {
 		exists := false
 		if statusCode == 200 {
@@ -133,7 +135,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 		if modifiedAt == "" {
 			exists = false
 		}
-		log.Infof("onHttpRequestHeaders check s3 complete: %s, %d, %s", ctx.Path(), statusCode, modifiedAt)
+		log.Errorf("onHttpRequestHeaders check s3 complete: %s, %d, %s", ctx.Path(), statusCode, modifiedAt)
 
 		if exists && config.setting.cacheTTL > 0 {
 			datetime, err := time.Parse(time.RFC1123, modifiedAt)
@@ -149,7 +151,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 		}
 		if exists {
 			ctx.SetContext("s3_file_exists", true)
-			log.Infof("onHttpRequestHeaders s3 file exists: %s", ctx.Path())
+			log.Errorf("onHttpRequestHeaders s3 file exists: %s", ctx.Path())
 
 			headers := make([][2]string, 0)
 			for key, item := range responseHeaders {
@@ -173,7 +175,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 		return types.ActionContinue
 	}
 
-	return types.HeaderStopAllIterationAndBuffer
+	return types.ActionPause
 }
 
 func onHttpResponseHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrapper.Log) types.Action {
@@ -193,11 +195,26 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wra
 
 		ctx.SetContext("remote_file_content_type", content)
 	}
+	headers := ""
+	list, err := proxywasm.GetHttpResponseHeaders()
+	if err == nil {
+		for i := range list {
+			headers += fmt.Sprintf("%s:%s\n", list[i][0], list[i][1])
+		}
+	}
+
+	log.Errorf("onHttpResponseHeaders complete %s，%s, %s", ctx.GetStringContext("req_path", ""), status, headers)
 
 	return types.ActionContinue
 }
 
 func onHttpResponseBody(ctx wrapper.HttpContext, config W7ProxyCache, body []byte, log wrapper.Log) types.Action {
+	reqPath := ctx.GetStringContext("req_path", "")
+	log.Errorf("onHttpResponseBody complete %s", reqPath)
+	if reqPath == "" {
+		return types.ActionContinue
+	}
+
 	data := ctx.GetContext("remote_file_exists")
 	if data != nil {
 		remoteFileExists, ok := data.(bool)
@@ -220,11 +237,12 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config W7ProxyCache, body []byt
 		config.setting.region,
 		config.setting.host,
 		config.setting.bucket,
-		ctx.Path(),
+		reqPath,
 		"PUT",
 		3600*time.Second,
 		"",
 	)
+	log.Errorf("onHttpResponseBody put s3 path: %s, %s", reqPath, putPath)
 	if err != nil {
 		log.Errorf("onHttpResponseBody make s3 url failed: %v", err)
 		return types.ActionContinue
@@ -236,7 +254,7 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config W7ProxyCache, body []byt
 		headers = append(headers, [2]string{"Content-Type", contentType})
 	}
 	err = config.client.Put(putPath, headers, body, func(statusCode int, responseHeaders http.Header, responseBody []byte) {
-		log.Infof("onHttpResponseBody sync complete: %d, %s", statusCode, ctx.Path())
+		log.Errorf("onHttpResponseBody sync complete: %d, %s", statusCode, reqPath)
 
 		err := proxywasm.ResumeHttpResponse()
 		if err != nil {
@@ -245,8 +263,9 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config W7ProxyCache, body []byt
 		}
 	})
 	if err != nil {
+		log.Errorf("onHttpResponseBody sync failed %s, %s", reqPath, err.Error())
 		return types.ActionContinue
 	}
 
-	return types.DataStopIterationAndBuffer
+	return types.ActionPause
 }
