@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
 	"github.com/donknap/proxy-cache-s3/util"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
@@ -8,8 +9,11 @@ import (
 	"github.com/tidwall/gjson"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
+
+var syncResourceMap = sync.Map{}
 
 func main() {
 	wrapper.SetCtx(
@@ -22,11 +26,9 @@ func main() {
 }
 
 type W7ProxyCache struct {
-	client   wrapper.HttpClient
-	cacheKey []string
-	setting  struct {
-		cacheTTL       int64
-		cacheHeader    bool
+	client       wrapper.HttpClient
+	targetClient wrapper.HttpClient
+	setting      struct {
 		accessKey      string
 		secretKey      string
 		region         string
@@ -34,6 +36,11 @@ type W7ProxyCache struct {
 		host           string
 		port           int64
 		purgeReqMethod string
+		cacheTTL       int64
+
+		targetServerName   string
+		targetServerDomain string
+		targetServerPort   int64
 	}
 }
 
@@ -71,17 +78,35 @@ func parseConfig(json gjson.Result, config *W7ProxyCache, log wrapper.Log) error
 		config.setting.purgeReqMethod = strings.Replace(value, " ", "", -1)
 	}
 
+	if json.Get("target_server_name").Exists() {
+		value := json.Get("target_server_name").String()
+		config.setting.targetServerName = strings.Replace(value, " ", "", -1)
+	}
+	if json.Get("target_server_domain").Exists() {
+		value := json.Get("target_server_domain").String()
+		config.setting.targetServerDomain = strings.Replace(value, " ", "", -1)
+	}
+	if json.Get("target_server_port").Exists() {
+		value := json.Get("target_server_port").Int()
+		config.setting.targetServerPort = value
+	}
+
 	if config.setting.accessKey == "" ||
 		config.setting.secretKey == "" ||
 		config.setting.region == "" ||
 		config.setting.bucket == "" ||
-		config.setting.host == "" {
+		config.setting.host == "" ||
+		config.setting.targetServerName == "" ||
+		config.setting.targetServerDomain == "" {
 		log.Error("s3 setting is empty")
 		return types.ErrorStatusBadArgument
 	}
 
 	if config.setting.port == 0 {
 		config.setting.port = 80
+	}
+	if config.setting.targetServerPort == 0 {
+		config.setting.targetServerPort = 80
 	}
 
 	urlServiceInfo := strings.Replace(config.setting.host, ".svc.cluster.local", "", 1)
@@ -91,13 +116,93 @@ func parseConfig(json gjson.Result, config *W7ProxyCache, log wrapper.Log) error
 		return types.ErrorStatusBadArgument
 	}
 	config.client = wrapper.NewClusterClient(wrapper.K8sCluster{
-		Port:        80,
+		Port:        config.setting.port,
 		Version:     "",
 		ServiceName: urlServiceInfoArr[0],
 		Namespace:   urlServiceInfoArr[1],
 	})
 
+	config.targetClient = wrapper.NewClusterClient(wrapper.DnsCluster{
+		Port:        config.setting.targetServerPort,
+		ServiceName: config.setting.targetServerName,
+		Domain:      config.setting.targetServerDomain,
+	})
+
+	wrapper.RegisteTickFunc(3000, syncResource(*config, log))
+
 	return nil
+}
+
+func syncResource(config W7ProxyCache, log wrapper.Log) func() {
+	return func() {
+		total := 8
+		curNum := 0
+
+		syncedList := make([]string, 0)
+		syncResourceMap.Range(func(key, value any) bool {
+			reqPath := key.(string)
+			log.Errorf("syncResource: %s", reqPath)
+			err := config.targetClient.Get(reqPath, nil, func(statusCode int, responseHeaders http.Header, responseBody []byte) {
+				if statusCode != 200 {
+					return
+				}
+
+				info, ok := value.(map[string]interface{})
+				if !ok {
+					log.Errorf("syncResource value type error")
+					return
+				}
+
+				putPath, err := util.GeneratePresignedURL(
+					config.setting.accessKey,
+					config.setting.secretKey,
+					"",
+					config.setting.region,
+					config.setting.host,
+					config.setting.bucket,
+					reqPath,
+					"PUT",
+					3600*time.Second,
+					"",
+				)
+				log.Errorf("syncResource put s3 path: %s, %s", reqPath, putPath)
+				if err != nil {
+					log.Errorf("syncResource make s3 url failed: %v", err)
+					return
+				}
+
+				headers := make([][2]string, 0)
+				headerData, exists := info["headers"]
+				if exists {
+					headers = headerData.([][2]string)
+				}
+				fmt.Print("headers: %v", headers)
+
+				err = config.client.Put(putPath, headers, responseBody, func(statusCode int, responseHeaders http.Header, responseBody []byte) {
+					log.Errorf("syncResource sync complete: %d, %s", statusCode, reqPath)
+				})
+				if err != nil {
+					log.Errorf("syncResource put s3 failed: %v", err)
+				}
+			})
+			if err != nil {
+				log.Errorf("syncResource failed: %v", err)
+			}
+
+			syncedList = append(syncedList, reqPath)
+
+			curNum += 1
+			if curNum >= total {
+				return false
+			}
+
+			return true
+		})
+
+		for _, item := range syncedList {
+			syncResourceMap.Delete(item)
+		}
+	}
 }
 
 func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrapper.Log) types.Action {
@@ -219,42 +324,15 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config W7ProxyCache, body []byt
 		}
 	}
 
-	putPath, err := util.GeneratePresignedURL(
-		config.setting.accessKey,
-		config.setting.secretKey,
-		"",
-		config.setting.region,
-		config.setting.host,
-		config.setting.bucket,
-		reqPath,
-		"PUT",
-		3600*time.Second,
-		"",
-	)
-	log.Errorf("onHttpResponseBody put s3 path: %s, %s", reqPath, putPath)
-	if err != nil {
-		log.Errorf("onHttpResponseBody make s3 url failed: %v", err)
-		return types.ActionContinue
-	}
-
 	headers := make([][2]string, 0)
 	contentType := ctx.GetStringContext("remote_file_content_type", "")
 	if contentType != "" {
 		headers = append(headers, [2]string{"Content-Type", contentType})
 	}
-	err = config.client.Put(putPath, headers, body, func(statusCode int, responseHeaders http.Header, responseBody []byte) {
-		log.Errorf("onHttpResponseBody sync complete: %d, %s", statusCode, reqPath)
 
-		err := proxywasm.ResumeHttpResponse()
-		if err != nil {
-			log.Errorf("onHttpResponseBody resume response failed %s", err.Error())
-			return
-		}
+	syncResourceMap.Store(reqPath, map[string]interface{}{
+		"headers": headers,
 	})
-	if err != nil {
-		log.Errorf("onHttpResponseBody sync failed %s, %s", reqPath, err.Error())
-		return types.ActionContinue
-	}
 
-	return types.ActionPause
+	return types.ActionContinue
 }
