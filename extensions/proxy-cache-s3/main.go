@@ -41,6 +41,9 @@ type W7ProxyCache struct {
 		targetServerName   string
 		targetServerDomain string
 		targetServerPort   int64
+
+		syncTickStep int64
+		syncNum      int64
 	}
 }
 
@@ -90,6 +93,12 @@ func parseConfig(json gjson.Result, config *W7ProxyCache, log wrapper.Log) error
 		value := json.Get("target_server_port").Int()
 		config.setting.targetServerPort = value
 	}
+	if json.Get("sync_tick_step").Exists() {
+		config.setting.syncTickStep = json.Get("sync_tick_step").Int()
+	}
+	if json.Get("sync_num").Exists() {
+		config.setting.syncNum = json.Get("sync_num").Int()
+	}
 
 	if config.setting.accessKey == "" ||
 		config.setting.secretKey == "" ||
@@ -107,6 +116,12 @@ func parseConfig(json gjson.Result, config *W7ProxyCache, log wrapper.Log) error
 	}
 	if config.setting.targetServerPort == 0 {
 		config.setting.targetServerPort = 80
+	}
+	if config.setting.syncTickStep == 0 {
+		config.setting.syncTickStep = 3000
+	}
+	if config.setting.syncNum == 0 {
+		config.setting.syncNum = 8
 	}
 
 	urlServiceInfo := strings.Replace(config.setting.host, ".svc.cluster.local", "", 1)
@@ -128,15 +143,15 @@ func parseConfig(json gjson.Result, config *W7ProxyCache, log wrapper.Log) error
 		Domain:      config.setting.targetServerDomain,
 	})
 
-	wrapper.RegisteTickFunc(3000, syncResource(*config, log))
+	wrapper.RegisteTickFunc(config.setting.syncTickStep, syncResource(*config, log))
 
 	return nil
 }
 
 func syncResource(config W7ProxyCache, log wrapper.Log) func() {
 	return func() {
-		total := 8
-		curNum := 0
+		total := config.setting.syncNum
+		curNum := int64(0)
 
 		syncedList := make([]string, 0)
 		syncResourceMap.Range(func(key, value any) bool {
