@@ -8,6 +8,7 @@ import (
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/tidwall/gjson"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -25,10 +26,11 @@ func main() {
 	)
 }
 
+var targetClientMap = sync.Map{}
+
 type W7ProxyCache struct {
-	client       wrapper.HttpClient
-	targetClient wrapper.HttpClient
-	setting      struct {
+	client  wrapper.HttpClient
+	setting struct {
 		accessKey      string
 		secretKey      string
 		region         string
@@ -38,16 +40,14 @@ type W7ProxyCache struct {
 		purgeReqMethod string
 		cacheTTL       int64
 
-		targetServerName   string
-		targetServerDomain string
-		targetServerPort   int64
-
 		syncTickStep int64
 		syncNum      int64
 	}
 }
 
 func parseConfig(json gjson.Result, config *W7ProxyCache, log wrapper.Log) error {
+	log.Errorf("parseConfig, %s", json.String())
+
 	// get cache ttl
 	if json.Get("cache_ttl").Exists() {
 		cacheTTL := json.Get("cache_ttl").Int()
@@ -81,18 +81,6 @@ func parseConfig(json gjson.Result, config *W7ProxyCache, log wrapper.Log) error
 		config.setting.purgeReqMethod = strings.Replace(value, " ", "", -1)
 	}
 
-	if json.Get("target_server_name").Exists() {
-		value := json.Get("target_server_name").String()
-		config.setting.targetServerName = strings.Replace(value, " ", "", -1)
-	}
-	if json.Get("target_server_domain").Exists() {
-		value := json.Get("target_server_domain").String()
-		config.setting.targetServerDomain = strings.Replace(value, " ", "", -1)
-	}
-	if json.Get("target_server_port").Exists() {
-		value := json.Get("target_server_port").Int()
-		config.setting.targetServerPort = value
-	}
 	if json.Get("sync_tick_step").Exists() {
 		config.setting.syncTickStep = json.Get("sync_tick_step").Int()
 	}
@@ -104,18 +92,13 @@ func parseConfig(json gjson.Result, config *W7ProxyCache, log wrapper.Log) error
 		config.setting.secretKey == "" ||
 		config.setting.region == "" ||
 		config.setting.bucket == "" ||
-		config.setting.host == "" ||
-		config.setting.targetServerName == "" ||
-		config.setting.targetServerDomain == "" {
+		config.setting.host == "" {
 		log.Error("s3 setting is empty")
 		return types.ErrorStatusBadArgument
 	}
 
 	if config.setting.port == 0 {
 		config.setting.port = 80
-	}
-	if config.setting.targetServerPort == 0 {
-		config.setting.targetServerPort = 80
 	}
 	if config.setting.syncTickStep == 0 {
 		config.setting.syncTickStep = 3000
@@ -137,18 +120,12 @@ func parseConfig(json gjson.Result, config *W7ProxyCache, log wrapper.Log) error
 		Namespace:   urlServiceInfoArr[1],
 	})
 
-	config.targetClient = wrapper.NewClusterClient(wrapper.DnsCluster{
-		Port:        config.setting.targetServerPort,
-		ServiceName: config.setting.targetServerName,
-		Domain:      config.setting.targetServerDomain,
-	})
-
-	wrapper.RegisteTickFunc(config.setting.syncTickStep, syncResource(*config, log))
+	wrapper.RegisteTickFunc(config.setting.syncTickStep, syncResource(config, log))
 
 	return nil
 }
 
-func syncResource(config W7ProxyCache, log wrapper.Log) func() {
+func syncResource(config *W7ProxyCache, log wrapper.Log) func() {
 	return func() {
 		total := config.setting.syncNum
 		curNum := int64(0)
@@ -157,14 +134,55 @@ func syncResource(config W7ProxyCache, log wrapper.Log) func() {
 		syncResourceMap.Range(func(key, value any) bool {
 			reqPath := key.(string)
 			log.Errorf("syncResource: %s", reqPath)
-			err := config.targetClient.Get(reqPath, nil, func(statusCode int, responseHeaders http.Header, responseBody []byte) {
-				if statusCode != 200 {
-					return
-				}
 
-				info, ok := value.(map[string]interface{})
-				if !ok {
-					log.Errorf("syncResource value type error")
+			info, ok := value.(map[string]interface{})
+			if !ok {
+				log.Errorf("syncResource value type error")
+				return true
+			}
+
+			clusterName := ""
+			_, exists := info["cluster_name"]
+			if !exists {
+				log.Errorf("syncResource get cluster_name failed: %s", reqPath)
+				return true
+			} else {
+				clusterName = info["cluster_name"].(string)
+			}
+			log.Errorf("syncResource cluster_name: %s", clusterName)
+			var targetClient wrapper.HttpClient
+			_targetClient, exists := targetClientMap.Load(clusterName)
+			if !exists {
+				clusterInfo := strings.Split(clusterName, "|")
+				if len(clusterInfo) != 4 {
+					log.Errorf("invalid cluster_name: %s", clusterName)
+					return true
+				}
+				port, err := strconv.Atoi(clusterInfo[1])
+				if err != nil {
+					log.Errorf("invalid port: %s", clusterInfo[1])
+					return true
+				}
+				//serviceInfo := strings.Split(clusterInfo[3], ".")
+				//if len(serviceInfo) != 2 {
+				//	log.Errorf("invalid service_name: %s", clusterInfo[3])
+				//	return true
+				//}
+				serviceName := clusterInfo[3]
+
+				targetClient = wrapper.NewClusterClient(wrapper.FQDNCluster{
+					Port: int64(port),
+					FQDN: serviceName,
+				})
+				log.Errorf("syncResource get s3 path: %s, %d", serviceName, port)
+				targetClientMap.Store(clusterName, targetClient)
+			} else {
+				targetClient = _targetClient.(wrapper.HttpClient)
+			}
+
+			err := targetClient.Get(reqPath, nil, func(statusCode int, responseHeaders http.Header, responseBody []byte) {
+				log.Errorf("syncResource get complete: %d, %s", statusCode, reqPath)
+				if statusCode != 200 {
 					return
 				}
 
@@ -224,6 +242,13 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 	if config.setting.purgeReqMethod != "" && strings.ToLower(config.setting.purgeReqMethod) == strings.ToLower(ctx.Method()) {
 		return types.ActionContinue
 	}
+
+	clusterName, err := proxywasm.GetProperty([]string{"cluster_name"})
+	if err != nil {
+		log.Errorf("onHttpRequestHeaders get cluster_name failed: %v", err)
+		return types.ActionContinue
+	}
+	ctx.SetContext("cluster_name", string(clusterName))
 
 	checkExistsUrl, err := util.GeneratePresignedURL(
 		config.setting.accessKey,
@@ -346,7 +371,8 @@ func onHttpResponseBody(ctx wrapper.HttpContext, config W7ProxyCache, body []byt
 	}
 
 	syncResourceMap.Store(reqPath, map[string]interface{}{
-		"headers": headers,
+		"headers":      headers,
+		"cluster_name": ctx.GetStringContext("cluster_name", ""),
 	})
 
 	return types.ActionContinue
