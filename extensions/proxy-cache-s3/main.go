@@ -42,6 +42,8 @@ type W7ProxyCache struct {
 
 		syncTickStep int64
 		syncNum      int64
+
+		targetHost string
 	}
 }
 
@@ -80,7 +82,10 @@ func parseConfig(json gjson.Result, config *W7ProxyCache, log wrapper.Log) error
 		value := json.Get("purge_req_method").String()
 		config.setting.purgeReqMethod = strings.Replace(value, " ", "", -1)
 	}
-
+	if json.Get("rewrite_host").Exists() {
+		value := json.Get("rewrite_host").String()
+		config.setting.targetHost = strings.Replace(value, " ", "", -1)
+	}
 	if json.Get("sync_tick_step").Exists() {
 		config.setting.syncTickStep = json.Get("sync_tick_step").Int()
 	}
@@ -92,7 +97,8 @@ func parseConfig(json gjson.Result, config *W7ProxyCache, log wrapper.Log) error
 		config.setting.secretKey == "" ||
 		config.setting.region == "" ||
 		config.setting.bucket == "" ||
-		config.setting.host == "" {
+		config.setting.host == "" ||
+		config.setting.targetHost == "" {
 		log.Error("s3 setting is empty")
 		return types.ErrorStatusBadArgument
 	}
@@ -163,18 +169,15 @@ func syncResource(config *W7ProxyCache, log wrapper.Log) func() {
 					log.Errorf("invalid port: %s", clusterInfo[1])
 					return true
 				}
-				//serviceInfo := strings.Split(clusterInfo[3], ".")
-				//if len(serviceInfo) != 2 {
-				//	log.Errorf("invalid service_name: %s", clusterInfo[3])
-				//	return true
-				//}
-				serviceName := clusterInfo[3]
 
-				targetClient = wrapper.NewClusterClient(wrapper.FQDNCluster{
-					Port: int64(port),
-					FQDN: serviceName,
+				serviceName := strings.ReplaceAll(clusterInfo[3], ".dns", "")
+				targetClient = wrapper.NewClusterClient(wrapper.DnsCluster{
+					Port:        int64(port),
+					ServiceName: serviceName,
+					Domain:      config.setting.targetHost,
 				})
-				log.Errorf("syncResource get s3 path: %s, %d", serviceName, port)
+				log.Errorf("syncResource get s3 path: %s, %s, %d", config.setting.targetHost, serviceName, port)
+				log.Errorf("syncResource get s3 path: %s, %d", config.setting.targetHost, port)
 				targetClientMap.Store(clusterName, targetClient)
 			} else {
 				targetClient = _targetClient.(wrapper.HttpClient)

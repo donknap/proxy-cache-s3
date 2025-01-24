@@ -14,7 +14,7 @@ IMG ?= ${REGISTRY}${PLUGIN_NAME}:${IMAGE_TAG}
 GOPROXY := $(shell go env GOPROXY)
 EXTRA_TAGS ?= proxy_wasm_version_0_2_100
 
-IMAGE_VERSION=
+IMAGE_VERSION ?= 1.0.0
 
 .DEFAULT:
 build:
@@ -29,8 +29,8 @@ build:
 	@echo ""
 	@echo "output wasm file: extensions/${PLUGIN_NAME}/plugin.wasm"
 	docker compose up -d --build
-	docker build -t ccr.ccs.tencentyun.com/donknap/proxy:test-go-${IMAGE_VERSION} -f Dockerfile-proxy .
-	docker push ccr.ccs.tencentyun.com/donknap/proxy:test-go-${IMAGE_VERSION}
+	docker build -t docker.wos.w7.com/public/proxy:go-${IMAGE_VERSION} -f Dockerfile-proxy .
+	docker push docker.wos.w7.com/public/proxy:go-${IMAGE_VERSION}
 
 build-image:
 	DOCKER_BUILDKIT=1 docker build --build-arg PLUGIN_NAME=${PLUGIN_NAME} \
