@@ -22,7 +22,6 @@ func main() {
 		wrapper.ParseConfigBy(parseConfig),
 		wrapper.ProcessRequestHeadersBy(onHttpRequestHeaders),
 		wrapper.ProcessResponseHeadersBy(onHttpResponseHeaders),
-		wrapper.ProcessResponseBodyBy(onHttpResponseBody),
 	)
 }
 
@@ -311,6 +310,8 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 			return
 		}
 
+		log.Errorf("onHttpRequestHeaders check s3 complete1: %s, %d, %s", ctx.Path(), statusCode, modifiedAt)
+
 		err = proxywasm.ResumeHttpRequest()
 		if err != nil {
 			log.Errorf("onHttpRequestHeaders resume request failed %s", err.Error())
@@ -325,58 +326,36 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 }
 
 func onHttpResponseHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrapper.Log) types.Action {
+	reqPath := ctx.GetStringContext("req_path", "")
+
+	log.Errorf("onHttpResponseHeaders begin %s", reqPath)
 	status, err := proxywasm.GetHttpResponseHeader(":status")
 	if err != nil {
 		log.Errorf("onHttpResponseHeaders get status failed %s", err.Error())
 		return types.ActionContinue
 	}
 	if status == "200" {
-		ctx.SetContext("remote_file_exists", true)
-
-		content, err := proxywasm.GetHttpResponseHeader("content-type")
+		contentType, err := proxywasm.GetHttpResponseHeader("content-type")
 		if err != nil {
 			log.Errorf("onHttpResponseHeaders get content type failed %s", err.Error())
 			return types.ActionContinue
 		}
 
-		ctx.SetContext("remote_file_content_type", content)
-	}
+		s3FileExists := ctx.GetBoolContext("s3_file_exists", false)
+		if !s3FileExists {
+			headers := make([][2]string, 0)
+			if contentType != "" {
+				headers = append(headers, [2]string{"Content-Type", contentType})
+			}
 
-	return types.ActionContinue
-}
+			log.Errorf("onHttpResponseHeaders sync complete %s", reqPath)
 
-func onHttpResponseBody(ctx wrapper.HttpContext, config W7ProxyCache, body []byte, log wrapper.Log) types.Action {
-	reqPath := ctx.GetStringContext("req_path", "")
-	log.Errorf("onHttpResponseBody complete %s", reqPath)
-	if reqPath == "" {
-		return types.ActionContinue
-	}
-
-	data := ctx.GetContext("remote_file_exists")
-	if data != nil {
-		remoteFileExists, ok := data.(bool)
-		if ok && !remoteFileExists {
-			return types.ActionContinue
+			syncResourceMap.Store(reqPath, map[string]interface{}{
+				"headers":      headers,
+				"cluster_name": ctx.GetStringContext("cluster_name", ""),
+			})
 		}
 	}
-	data = ctx.GetContext("s3_file_exists")
-	if data != nil {
-		s3FileExists, ok := data.(bool)
-		if ok && s3FileExists {
-			return types.ActionContinue
-		}
-	}
-
-	headers := make([][2]string, 0)
-	contentType := ctx.GetStringContext("remote_file_content_type", "")
-	if contentType != "" {
-		headers = append(headers, [2]string{"Content-Type", contentType})
-	}
-
-	syncResourceMap.Store(reqPath, map[string]interface{}{
-		"headers":      headers,
-		"cluster_name": ctx.GetStringContext("cluster_name", ""),
-	})
 
 	return types.ActionContinue
 }
