@@ -125,14 +125,13 @@ func parseConfig(json gjson.Result, config *W7ProxyCache, log wrapper.Log) error
 		Namespace:   urlServiceInfoArr[1],
 	})
 
-	wrapper.RegisteTickFunc(config.setting.syncTickStep, syncResource(config, log))
+	wrapper.RegisteTickFunc(config.setting.syncTickStep, syncResource(config.setting.syncNum, log))
 
 	return nil
 }
 
-func syncResource(config *W7ProxyCache, log wrapper.Log) func() {
+func syncResource(syncNum int64, log wrapper.Log) func() {
 	return func() {
-		total := config.setting.syncNum
 		curNum := int64(0)
 
 		syncedList := make([]string, 0)
@@ -145,9 +144,16 @@ func syncResource(config *W7ProxyCache, log wrapper.Log) func() {
 				log.Errorf("syncResource value type error")
 				return true
 			}
-
+			config := W7ProxyCache{}
+			_, exists := info["config"]
+			if !exists {
+				log.Errorf("syncResource get config failed: %s", reqPath)
+				return true
+			} else {
+				config = info["config"].(W7ProxyCache)
+			}
 			clusterName := ""
-			_, exists := info["cluster_name"]
+			_, exists = info["cluster_name"]
 			if !exists {
 				log.Errorf("syncResource get cluster_name failed: %s", reqPath)
 				return true
@@ -227,7 +233,7 @@ func syncResource(config *W7ProxyCache, log wrapper.Log) func() {
 			syncedList = append(syncedList, reqPath)
 
 			curNum += 1
-			if curNum >= total {
+			if curNum >= syncNum {
 				return false
 			}
 
@@ -270,7 +276,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 	}
 	ctx.SetContext("req_path", ctx.Path())
 
-	log.Errorf("onHttpRequestHeaders check s3 path: %s", ctx.Path())
+	log.Errorf("onHttpRequestHeaders check s3 path: %s, bucket: %s", ctx.Path(), config.setting.bucket)
 	err = config.client.Get(checkExistsUrl, nil, func(statusCode int, responseHeaders http.Header, responseBody []byte) {
 		exists := false
 		if statusCode == 200 {
@@ -353,6 +359,7 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wra
 			syncResourceMap.Store(reqPath, map[string]interface{}{
 				"headers":      headers,
 				"cluster_name": ctx.GetStringContext("cluster_name", ""),
+				"config":       config,
 			})
 		}
 	}
