@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
 	"github.com/donknap/proxy-cache-s3/util"
@@ -8,6 +9,8 @@ import (
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/tidwall/gjson"
 	"net/http"
+	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,6 +30,23 @@ func main() {
 
 var targetClientMap = sync.Map{}
 
+type pathCacheRule struct {
+	CacheType string `json:"cache_type"`
+	Path      string `json:"path"`
+	Enable    bool   `json:"enable"`
+	CacheTtl  int64  `json:"cache_ttl"`
+	Weight    int64  `json:"weight"`
+}
+
+type pathKeyCacheRule struct {
+	CacheType     string   `json:"cache_type"`
+	Path          string   `json:"path"`
+	IgnoreKeyRule string   `json:"ignore_key_rule"`
+	Keys          []string `json:"keys"`
+	IgnoreCase    bool     `json:"ignore_case"`
+	Weight        int64    `json:"weight"`
+}
+
 type W7ProxyCache struct {
 	client  wrapper.HttpClient
 	setting struct {
@@ -37,7 +57,9 @@ type W7ProxyCache struct {
 		host           string
 		port           int64
 		purgeReqMethod string
-		cacheTTL       int64
+
+		pathCacheRules    []pathCacheRule
+		pathKeyCacheRules []pathKeyCacheRule
 
 		syncTickStep int64
 		syncNum      int64
@@ -46,50 +68,45 @@ type W7ProxyCache struct {
 	}
 }
 
-func parseConfig(json gjson.Result, config *W7ProxyCache, log wrapper.Log) error {
-	log.Errorf("parseConfig, %s", json.String())
+func parseConfig(data gjson.Result, config *W7ProxyCache, log wrapper.Log) error {
+	log.Errorf("parseConfig, %s", data.String())
 
-	// get cache ttl
-	if json.Get("cache_ttl").Exists() {
-		cacheTTL := json.Get("cache_ttl").Int()
-		config.setting.cacheTTL = cacheTTL
-	}
-	if json.Get("access_key").Exists() {
-		value := json.Get("access_key").String()
+	if data.Get("access_key").Exists() {
+		value := data.Get("access_key").String()
 		config.setting.accessKey = strings.Replace(value, " ", "", -1)
 	}
-	if json.Get("secret_key").Exists() {
-		value := json.Get("secret_key").String()
+	if data.Get("secret_key").Exists() {
+		value := data.Get("secret_key").String()
 		config.setting.secretKey = strings.Replace(value, " ", "", -1)
 	}
-	if json.Get("region").Exists() {
-		value := json.Get("region").String()
+	if data.Get("region").Exists() {
+		value := data.Get("region").String()
 		config.setting.region = strings.Replace(value, " ", "", -1)
 	}
-	if json.Get("bucket").Exists() {
-		value := json.Get("bucket").String()
+	if data.Get("bucket").Exists() {
+		value := data.Get("bucket").String()
 		config.setting.bucket = strings.Replace(value, " ", "", -1)
 	}
-	if json.Get("host").Exists() {
-		value := json.Get("host").String()
+	if data.Get("host").Exists() {
+		value := data.Get("host").String()
 		config.setting.host = strings.Replace(value, " ", "", -1)
 	}
-	if json.Get("port").Exists() {
-		config.setting.port = json.Get("port").Int()
+	if data.Get("port").Exists() {
+		config.setting.port = data.Get("port").Int()
 	}
-	if json.Get("purge_req_method").Exists() {
-		value := json.Get("purge_req_method").String()
+	if data.Get("purge_req_method").Exists() {
+		value := data.Get("purge_req_method").String()
 		config.setting.purgeReqMethod = strings.Replace(value, " ", "", -1)
 	}
-	if json.Get("rewrite_host").Exists() {
-		value := json.Get("rewrite_host").String()
+	if data.Get("rewrite_host").Exists() {
+		value := data.Get("rewrite_host").String()
 		config.setting.targetHost = strings.Replace(value, " ", "", -1)
 	}
-	if json.Get("sync_tick_step").Exists() {
-		config.setting.syncTickStep = json.Get("sync_tick_step").Int()
+	if data.Get("sync_tick_step").Exists() {
+		config.setting.syncTickStep = data.Get("sync_tick_step").Int()
 	}
-	if json.Get("sync_num").Exists() {
-		config.setting.syncNum = json.Get("sync_num").Int()
+	if data.Get("sync_num").Exists() {
+		config.setting.syncNum = data.Get("sync_num").Int()
 	}
 
 	if config.setting.accessKey == "" ||
@@ -110,6 +127,33 @@ func parseConfig(json gjson.Result, config *W7ProxyCache, log wrapper.Log) error
 	}
 	if config.setting.syncNum == 0 {
 		config.setting.syncNum = 8
+	}
+
+	if data.Get("path_cache_rules").Exists() {
+		rulesStr := data.Get("cache_rules").String()
+		var rules []pathCacheRule
+		if err := json.Unmarshal([]byte(rulesStr), &rules); err != nil {
+			log.Errorf("parse cache rules failed: %s", err.Error())
+			return types.ErrorStatusBadArgument
+		} else {
+			sort.Slice(rules, func(i, j int) bool {
+				return rules[i].Weight < rules[j].Weight
+			})
+			config.setting.pathCacheRules = rules
+		}
+	}
+	if data.Get("path_key_cache_rules").Exists() {
+		rulesStr := data.Get("path_key_cache_rules").String()
+		var rules []pathKeyCacheRule
+		if err := json.Unmarshal([]byte(rulesStr), &rules); err != nil {
+			log.Errorf("parse path key cache rules failed: %s", err.Error())
+			return types.ErrorStatusBadArgument
+		} else {
+			sort.Slice(rules, func(i, j int) bool {
+				return rules[i].Weight < rules[j].Weight
+			})
+			config.setting.pathKeyCacheRules = rules
+		}
 	}
 
 	urlServiceInfo := strings.Replace(config.setting.host, ".svc.cluster.local", "", 1)
@@ -246,6 +290,108 @@ func syncResource(syncNum int64, log wrapper.Log) func() {
 	}
 }
 
+func getPathCacheRule(path string, rules []pathCacheRule) (*pathCacheRule, error) {
+	parsedURL, err := url.Parse(path)
+	if err != nil {
+		return nil, err
+	}
+	path = parsedURL.Path
+
+	var defaultRule *pathCacheRule
+	for _, rule := range rules {
+		switch rule.CacheType {
+		case "suffix":
+			if strings.HasSuffix(path, rule.Path) {
+				return &rule, nil
+			}
+		case "path":
+			if path == rule.Path {
+				return &rule, nil
+			}
+		case "dir":
+			if strings.HasPrefix(path, rule.Path) {
+				return &rule, nil
+			}
+		case "all":
+			defaultRule = &rule // 保存匹配所有文件的规则
+		default:
+			fmt.Printf("Unknown cacheType: %s\n", rule.CacheType)
+		}
+	}
+
+	// 如果没有找到其他匹配规则，返回默认规则
+	return defaultRule, nil
+}
+
+func getPathKeyCacheRule(path string, rules []pathKeyCacheRule) (*pathKeyCacheRule, error) {
+	parsedURL, err := url.Parse(path)
+	if err != nil {
+		return nil, err
+	}
+	path = parsedURL.Path
+
+	var defaultRule *pathKeyCacheRule
+	for _, rule := range rules {
+		switch rule.CacheType {
+		case "suffix":
+			if strings.HasSuffix(path, rule.Path) {
+				return &rule, nil
+			}
+		case "path":
+			if path == rule.Path {
+				return &rule, nil
+			}
+		case "dir":
+			if strings.HasPrefix(path, rule.Path) {
+				return &rule, nil
+			}
+		case "all":
+			defaultRule = &rule // 保存匹配所有文件的规则
+		default:
+			fmt.Printf("Unknown cacheType: %s\n", rule.CacheType)
+		}
+	}
+
+	// 如果没有找到其他匹配规则，返回默认规则
+	return defaultRule, nil
+}
+
+func processPathByRule(path string, rule *pathKeyCacheRule) string {
+	parsedURL, err := url.Parse(path)
+	if err != nil {
+		return path
+	}
+
+	// 根据 IgnoreKeyRule 处理查询参数
+	switch rule.IgnoreKeyRule {
+	case "ignore":
+		parsedURL.RawQuery = ""
+	case "keep":
+		// 保留所有查询参数
+	case "keep_specified":
+		query := url.Values{}
+		for _, key := range rule.Keys {
+			if value := parsedURL.Query().Get(key); value != "" {
+				query.Add(key, value)
+			}
+		}
+		parsedURL.RawQuery = query.Encode()
+	case "ignore_specified":
+		query := url.Values{}
+		for key, values := range parsedURL.Query() {
+			for _, value := range values {
+				query.Add(key, value)
+			}
+		}
+		for _, key := range rule.Keys {
+			query.Del(key)
+		}
+		parsedURL.RawQuery = query.Encode()
+	}
+
+	return parsedURL.String()
+}
+
 func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrapper.Log) types.Action {
 	if config.setting.purgeReqMethod != "" && strings.ToLower(config.setting.purgeReqMethod) == strings.ToLower(ctx.Method()) {
 		return types.ActionContinue
@@ -258,6 +404,32 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 	}
 	ctx.SetContext("cluster_name", string(clusterName))
 
+	//检测是否需要缓存，如果需要缓存，则将请求转发到s3
+	_pathCacheRule, err := getPathCacheRule(ctx.Path(), config.setting.pathCacheRules)
+	if err != nil {
+		log.Errorf("onHttpRequestHeaders get cache rule failed: %v", err)
+		ctx.SetContext("cache_enable", false)
+		return types.ActionContinue
+	}
+	if _pathCacheRule == nil {
+		ctx.SetContext("cache_enable", false)
+		return types.ActionContinue
+	}
+	log.Errorf("onHttpRequestHeaders get cache rule %v", _pathCacheRule)
+	ctx.SetContext("cache_enable", _pathCacheRule.Enable)
+	if !_pathCacheRule.Enable {
+		return types.ActionContinue
+	}
+
+	realPath := ctx.Path()
+	_pathKeyCacheRule, err := getPathKeyCacheRule(realPath, config.setting.pathKeyCacheRules)
+	if err != nil {
+		log.Errorf("onHttpRequestHeaders get cache key rule failed: %v", err)
+	}
+	if _pathKeyCacheRule != nil {
+		realPath = processPathByRule(realPath, _pathKeyCacheRule)
+	}
+
 	checkExistsUrl, err := util.GeneratePresignedURL(
 		config.setting.accessKey,
 		config.setting.secretKey,
@@ -265,7 +437,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 		config.setting.region,
 		config.setting.host,
 		config.setting.bucket,
-		ctx.Path(),
+		realPath,
 		"GET",
 		30*time.Second,
 		"",
@@ -274,9 +446,9 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 		log.Errorf("onHttpRequestHeaders make s3 check url failed: %v", err)
 		return types.ActionContinue
 	}
-	ctx.SetContext("req_path", ctx.Path())
+	ctx.SetContext("req_path", realPath)
 
-	log.Errorf("onHttpRequestHeaders check s3 path: %s, bucket: %s", ctx.Path(), config.setting.bucket)
+	log.Errorf("onHttpRequestHeaders check s3 path: %s, bucket: %s", realPath, config.setting.bucket)
 	err = config.client.Get(checkExistsUrl, nil, func(statusCode int, responseHeaders http.Header, responseBody []byte) {
 		exists := false
 		if statusCode == 200 {
@@ -286,14 +458,14 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 		if modifiedAt == "" {
 			exists = false
 		}
-		log.Errorf("onHttpRequestHeaders check s3 complete: %s, %d, %s", ctx.Path(), statusCode, modifiedAt)
+		log.Errorf("onHttpRequestHeaders check s3 complete: %s, %d, %s", realPath, statusCode, modifiedAt)
 
-		if exists && config.setting.cacheTTL > 0 {
+		if exists && _pathCacheRule.CacheTtl > 0 {
 			datetime, err := time.Parse(time.RFC1123, modifiedAt)
 			if err == nil {
 				// 计算从datetime到现在的时间差（秒）
 				duration := time.Since(datetime).Seconds()
-				if duration > float64(config.setting.cacheTTL) {
+				if duration > float64(_pathCacheRule.CacheTtl) {
 					exists = false
 				}
 			} else {
@@ -302,7 +474,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 		}
 		if exists {
 			ctx.SetContext("s3_file_exists", true)
-			log.Errorf("onHttpRequestHeaders s3 file exists: %s", ctx.Path())
+			log.Errorf("onHttpRequestHeaders s3 file exists: %s", realPath)
 
 			headers := make([][2]string, 0)
 			for key, item := range responseHeaders {
@@ -316,7 +488,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 			return
 		}
 
-		log.Errorf("onHttpRequestHeaders check s3 complete1: %s, %d, %s", ctx.Path(), statusCode, modifiedAt)
+		log.Errorf("onHttpRequestHeaders check s3 complete1: %s, %d, %s", realPath, statusCode, modifiedAt)
 
 		err = proxywasm.ResumeHttpRequest()
 		if err != nil {
@@ -332,6 +504,11 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 }
 
 func onHttpResponseHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrapper.Log) types.Action {
+	enableCache := ctx.GetBoolContext("cache_enable", false)
+	if !enableCache {
+		return types.ActionContinue
+	}
+
 	reqPath := ctx.GetStringContext("req_path", "")
 
 	log.Errorf("onHttpResponseHeaders begin %s", reqPath)
