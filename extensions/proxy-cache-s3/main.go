@@ -334,16 +334,34 @@ func getPathKeyCacheRule(path string, rules []pathKeyCacheRule) (*pathKeyCacheRu
 	for _, rule := range rules {
 		switch rule.CacheType {
 		case "suffix":
-			if strings.HasSuffix(path, rule.Path) {
-				return &rule, nil
+			if rule.IgnoreCase {
+				if strings.HasSuffix(strings.ToLower(path), strings.ToLower(rule.Path)) {
+					return &rule, nil
+				}
+			} else {
+				if strings.HasSuffix(path, rule.Path) {
+					return &rule, nil
+				}
 			}
 		case "path":
-			if path == rule.Path {
-				return &rule, nil
+			if rule.IgnoreCase {
+				if strings.ToLower(path) == strings.ToLower(rule.Path) {
+					return &rule, nil
+				}
+			} else {
+				if path == rule.Path {
+					return &rule, nil
+				}
 			}
 		case "dir":
-			if strings.HasPrefix(path, rule.Path) {
-				return &rule, nil
+			if rule.IgnoreCase {
+				if strings.HasPrefix(strings.ToLower(path), strings.ToLower(rule.Path)) {
+					return &rule, nil
+				}
+			} else {
+				if strings.HasPrefix(path, rule.Path) {
+					return &rule, nil
+				}
 			}
 		case "all":
 			defaultRule = &rule // 保存匹配所有文件的规则
