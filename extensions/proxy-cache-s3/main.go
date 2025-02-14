@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
 	"github.com/donknap/proxy-cache-s3/util"
@@ -31,16 +30,16 @@ func main() {
 var targetClientMap = sync.Map{}
 
 type pathCacheRule struct {
-	CacheType string `json:"cache_type"`
-	Path      string `json:"path"`
-	Enable    bool   `json:"enable"`
-	CacheTtl  int64  `json:"cache_ttl"`
-	Weight    int64  `json:"weight"`
+	CacheType string   `json:"cache_type"`
+	Paths     []string `json:"paths"`
+	Enable    bool     `json:"enable"`
+	CacheTtl  int64    `json:"cache_ttl"`
+	Weight    int64    `json:"weight"`
 }
 
 type pathKeyCacheRule struct {
 	CacheType     string   `json:"cache_type"`
-	Path          string   `json:"path"`
+	Paths         []string `json:"paths"`
 	IgnoreKeyRule string   `json:"ignore_key_rule"`
 	Keys          []string `json:"keys"`
 	IgnoreCase    bool     `json:"ignore_case"`
@@ -129,31 +128,51 @@ func parseConfig(data gjson.Result, config *W7ProxyCache, log wrapper.Log) error
 		config.setting.syncNum = 8
 	}
 
+	config.setting.pathCacheRules = []pathCacheRule{}
 	if data.Get("path_cache_rules").Exists() {
-		rulesStr := data.Get("cache_rules").String()
-		var rules []pathCacheRule
-		if err := json.Unmarshal([]byte(rulesStr), &rules); err != nil {
-			log.Errorf("parse cache rules failed: %s", err.Error())
-			return types.ErrorStatusBadArgument
-		} else {
-			sort.Slice(rules, func(i, j int) bool {
-				return rules[i].Weight < rules[j].Weight
+		rulesData := data.Get("path_cache_rules").Array()
+		for _, item := range rulesData {
+			paths := []string{}
+			for _, path := range item.Get("paths").Array() {
+				paths = append(paths, path.String())
+			}
+			config.setting.pathCacheRules = append(config.setting.pathCacheRules, pathCacheRule{
+				CacheType: item.Get("cache_type").String(),
+				Paths:     paths,
+				Enable:    item.Get("enable").Bool(),
+				CacheTtl:  item.Get("cache_ttl").Int(),
+				Weight:    item.Get("weight").Int(),
 			})
-			config.setting.pathCacheRules = rules
 		}
+		sort.Slice(config.setting.pathCacheRules, func(i, j int) bool {
+			return config.setting.pathCacheRules[i].Weight < config.setting.pathCacheRules[j].Weight
+		})
+		log.Errorf("pathCacheRules: %v", config.setting.pathCacheRules)
 	}
+	config.setting.pathKeyCacheRules = []pathKeyCacheRule{}
 	if data.Get("path_key_cache_rules").Exists() {
-		rulesStr := data.Get("path_key_cache_rules").String()
-		var rules []pathKeyCacheRule
-		if err := json.Unmarshal([]byte(rulesStr), &rules); err != nil {
-			log.Errorf("parse path key cache rules failed: %s", err.Error())
-			return types.ErrorStatusBadArgument
-		} else {
-			sort.Slice(rules, func(i, j int) bool {
-				return rules[i].Weight < rules[j].Weight
+		for _, item := range data.Get("path_key_cache_rules").Array() {
+			keys := []string{}
+			for _, key := range item.Get("keys").Array() {
+				keys = append(keys, key.String())
+			}
+			paths := []string{}
+			for _, path := range item.Get("paths").Array() {
+				paths = append(paths, path.String())
+			}
+			config.setting.pathKeyCacheRules = append(config.setting.pathKeyCacheRules, pathKeyCacheRule{
+				CacheType:     item.Get("cache_type").String(),
+				Paths:         paths,
+				IgnoreKeyRule: item.Get("ignore_key_rule").String(),
+				Keys:          keys,
+				IgnoreCase:    item.Get("ignore_case").Bool(),
+				Weight:        item.Get("weight").Int(),
 			})
-			config.setting.pathKeyCacheRules = rules
 		}
+		sort.Slice(config.setting.pathKeyCacheRules, func(i, j int) bool {
+			return config.setting.pathKeyCacheRules[i].Weight < config.setting.pathKeyCacheRules[j].Weight
+		})
+		log.Errorf("pathKeyCacheRules: %v", config.setting.pathKeyCacheRules)
 	}
 
 	urlServiceInfo := strings.Replace(config.setting.host, ".svc.cluster.local", "", 1)
@@ -295,32 +314,42 @@ func getPathCacheRule(path string, rules []pathCacheRule) (*pathCacheRule, error
 	if err != nil {
 		return nil, err
 	}
-	path = parsedURL.Path
+	path = strings.TrimLeft(parsedURL.Path, "/")
+	if rules == nil || len(rules) == 0 {
+		return nil, nil
+	}
 
-	var defaultRule *pathCacheRule
+	var defaultRule pathCacheRule
 	for _, rule := range rules {
 		switch rule.CacheType {
 		case "suffix":
-			if strings.HasSuffix(path, rule.Path) {
-				return &rule, nil
+			for _, rpath := range rule.Paths {
+				if strings.HasSuffix(path, rpath) {
+					return &rule, nil
+				}
 			}
 		case "path":
-			if path == rule.Path {
-				return &rule, nil
+			for _, rpath := range rule.Paths {
+				if path == rpath {
+					return &rule, nil
+				}
 			}
 		case "dir":
-			if strings.HasPrefix(path, rule.Path) {
-				return &rule, nil
+			for _, rpath := range rule.Paths {
+				if strings.HasPrefix(path, rpath) {
+					return &rule, nil
+				}
 			}
 		case "all":
-			defaultRule = &rule // 保存匹配所有文件的规则
+			defaultRule = rule // 保存匹配所有文件的规则
 		default:
 			fmt.Printf("Unknown cacheType: %s\n", rule.CacheType)
+			return nil, fmt.Errorf("Unknown cacheType: %s", rule.CacheType)
 		}
 	}
 
 	// 如果没有找到其他匹配规则，返回默认规则
-	return defaultRule, nil
+	return &defaultRule, nil
 }
 
 func getPathKeyCacheRule(path string, rules []pathKeyCacheRule) (*pathKeyCacheRule, error) {
@@ -328,50 +357,67 @@ func getPathKeyCacheRule(path string, rules []pathKeyCacheRule) (*pathKeyCacheRu
 	if err != nil {
 		return nil, err
 	}
-	path = parsedURL.Path
+	path = strings.TrimLeft(parsedURL.Path, "/")
+	if rules == nil || len(rules) == 0 {
+		return nil, nil
+	}
 
-	var defaultRule *pathKeyCacheRule
+	var defaultRule pathKeyCacheRule
 	for _, rule := range rules {
 		switch rule.CacheType {
 		case "suffix":
 			if rule.IgnoreCase {
-				if strings.HasSuffix(strings.ToLower(path), strings.ToLower(rule.Path)) {
-					return &rule, nil
+				for _, rpath := range rule.Paths {
+					if strings.HasSuffix(strings.ToLower(path), strings.ToLower(rpath)) {
+						return &rule, nil
+					}
 				}
+
 			} else {
-				if strings.HasSuffix(path, rule.Path) {
-					return &rule, nil
+				for _, rpath := range rule.Paths {
+					if strings.HasSuffix(path, rpath) {
+						return &rule, nil
+					}
 				}
 			}
 		case "path":
 			if rule.IgnoreCase {
-				if strings.ToLower(path) == strings.ToLower(rule.Path) {
-					return &rule, nil
+				for _, rpath := range rule.Paths {
+					if strings.ToLower(path) == strings.ToLower(rpath) {
+						return &rule, nil
+					}
 				}
 			} else {
-				if path == rule.Path {
-					return &rule, nil
+				for _, rpath := range rule.Paths {
+					if path == rpath {
+						return &rule, nil
+					}
 				}
 			}
 		case "dir":
 			if rule.IgnoreCase {
-				if strings.HasPrefix(strings.ToLower(path), strings.ToLower(rule.Path)) {
-					return &rule, nil
+				for _, rpath := range rule.Paths {
+					if strings.HasPrefix(strings.ToLower(path), strings.ToLower(rpath)) {
+						return &rule, nil
+					}
 				}
 			} else {
-				if strings.HasPrefix(path, rule.Path) {
-					return &rule, nil
+				for _, rpath := range rule.Paths {
+					if strings.HasPrefix(path, rpath) {
+						return &rule, nil
+					}
 				}
 			}
 		case "all":
-			defaultRule = &rule // 保存匹配所有文件的规则
+			defaultRule = rule // 保存匹配所有文件的规则
 		default:
 			fmt.Printf("Unknown cacheType: %s\n", rule.CacheType)
+			return nil, fmt.Errorf("Unknown cacheType: %s", rule.CacheType)
 		}
 	}
 
 	// 如果没有找到其他匹配规则，返回默认规则
-	return defaultRule, nil
+	return &defaultRule, nil
 }
 
 func processPathByRule(path string, rule *pathKeyCacheRule) string {
