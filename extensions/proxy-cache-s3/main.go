@@ -435,8 +435,8 @@ func processPathByRule(path string, rule *pathKeyCacheRule) string {
 	case "keep_specified":
 		query := url.Values{}
 		for _, key := range rule.Keys {
-			if value := parsedURL.Query().Get(key); value != "" {
-				query.Add(key, value)
+			if parsedURL.Query().Has(key) {
+				query.Add(key, parsedURL.Query().Get(key))
 			}
 		}
 		parsedURL.RawQuery = query.Encode()
@@ -479,7 +479,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 		ctx.SetContext("cache_enable", false)
 		return types.ActionContinue
 	}
-	log.Errorf("onHttpRequestHeaders get cache rule %v", _pathCacheRule)
+	log.Errorf("onHttpRequestHeaders get cache rule %s, %v, %v", ctx.Path(), _pathCacheRule, config.setting.pathCacheRules)
 	ctx.SetContext("cache_enable", _pathCacheRule.Enable)
 	if !_pathCacheRule.Enable {
 		return types.ActionContinue
@@ -493,6 +493,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 	if _pathKeyCacheRule != nil {
 		realPath = processPathByRule(realPath, _pathKeyCacheRule)
 	}
+	log.Errorf("onHttpRequestHeaders12 get cache key rule%s,  %v, %v", ctx.Path(), _pathKeyCacheRule, config.setting.pathKeyCacheRules)
 
 	checkExistsUrl, err := util.GeneratePresignedURL(
 		config.setting.accessKey,
