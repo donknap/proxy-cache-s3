@@ -431,7 +431,7 @@ func processPathByRule(path string, rule *pathKeyCacheRule) string {
 	case "ignore":
 		parsedURL.RawQuery = ""
 	case "keep":
-		// 保留所有查询参数
+		parsedURL.RawQuery = parsedURL.Query().Encode()
 	case "keep_specified":
 		query := url.Values{}
 		for _, key := range rule.Keys {
