@@ -528,8 +528,8 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 		if exists && _pathCacheRule.CacheTtl > 0 {
 			datetime, err := time.Parse(time.RFC1123, modifiedAt)
 			if err == nil {
-				// 计算从datetime到现在的时间差（秒）
-				duration := time.Since(datetime).Seconds()
+				// 计算从datetime到现在的时间差（分钟）
+				duration := time.Since(datetime).Minutes()
 				if duration > float64(_pathCacheRule.CacheTtl) {
 					exists = false
 				}
