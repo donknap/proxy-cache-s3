@@ -29,8 +29,8 @@ build:
 	@echo ""
 	@echo "output wasm file: extensions/${PLUGIN_NAME}/plugin.wasm"
 	docker compose up -d --build
-	docker build -t docker.wos.w7.com/public/proxy:go-${IMAGE_VERSION} -f Dockerfile-proxy .
-	docker push docker.wos.w7.com/public/proxy:go-${IMAGE_VERSION}
+	docker build -t ccr.ccs.tencentyun.com/w7team/proxy:go-${IMAGE_VERSION} -f Dockerfile-proxy .
+	docker push ccr.ccs.tencentyun.com/w7team/proxy:go-${IMAGE_VERSION}
 
 build-image:
 	DOCKER_BUILDKIT=1 docker build --build-arg PLUGIN_NAME=${PLUGIN_NAME} \
