@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
 	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
 	"github.com/donknap/proxy-cache-s3/util"
@@ -9,6 +11,7 @@ import (
 	"github.com/tidwall/gjson"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -257,6 +260,7 @@ func syncResource(syncNum int64, log wrapper.Log) func() {
 					return
 				}
 
+				realPath := getRealSavePath(reqPath)
 				putPath, err := util.GeneratePresignedURL(
 					config.setting.accessKey,
 					config.setting.secretKey,
@@ -264,12 +268,12 @@ func syncResource(syncNum int64, log wrapper.Log) func() {
 					config.setting.region,
 					config.setting.host,
 					config.setting.bucket,
-					reqPath,
+					realPath,
 					"PUT",
 					3600*time.Second,
 					"",
 				)
-				log.Errorf("syncResource put s3 path: %s, %s", reqPath, putPath)
+				log.Errorf("syncResource put s3 path: %s, %s, %s", reqPath, realPath, putPath)
 				if err != nil {
 					log.Errorf("syncResource make s3 url failed: %v", err)
 					return
@@ -456,6 +460,30 @@ func processPathByRule(path string, rule *pathKeyCacheRule) string {
 	return parsedURL.String()
 }
 
+func getRealSavePath(originPath string) string {
+	query := ""
+	file := originPath
+	if idx := strings.Index(originPath, "?"); idx != -1 {
+		query = originPath[idx+1:]
+		file = originPath[:idx]
+	}
+
+	if query != "" {
+		// 计算 MD5
+		hash := md5.Sum([]byte(query))
+		md5Hash := hex.EncodeToString(hash[:])
+
+		// 分离文件名和扩展名
+		ext := filepath.Ext(file)
+		base := strings.TrimSuffix(file, ext)
+
+		// 构建新文件名
+		return fmt.Sprintf("%s-%s%s", base, md5Hash, ext)
+	}
+
+	return originPath
+}
+
 func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrapper.Log) types.Action {
 	if config.setting.purgeReqMethod != "" && strings.ToLower(config.setting.purgeReqMethod) == strings.ToLower(ctx.Method()) {
 		return types.ActionContinue
@@ -493,7 +521,8 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 	if _pathKeyCacheRule != nil {
 		realPath = processPathByRule(realPath, _pathKeyCacheRule)
 	}
-	log.Errorf("onHttpRequestHeaders12 get cache key rule%s,  %v, %v", ctx.Path(), _pathKeyCacheRule, config.setting.pathKeyCacheRules)
+	checkS3Path := getRealSavePath(realPath)
+	log.Errorf("onHttpRequestHeaders12 get cache key rule%s, %s, %v, %v", ctx.Path(), checkS3Path, _pathKeyCacheRule, config.setting.pathKeyCacheRules)
 
 	checkExistsUrl, err := util.GeneratePresignedURL(
 		config.setting.accessKey,
@@ -502,7 +531,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 		config.setting.region,
 		config.setting.host,
 		config.setting.bucket,
-		realPath,
+		checkS3Path,
 		"GET",
 		30*time.Second,
 		"",
