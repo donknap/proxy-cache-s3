@@ -1,20 +1,16 @@
 package main
 
 import (
-	"fmt"
 	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
-	"github.com/donknap/proxy-cache-s3/util"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 var syncResourceMap = sync.Map{}
-var targetClientMap = sync.Map{}
 
 func main() {
 	wrapper.SetCtx(
@@ -56,65 +52,31 @@ func syncResource(syncNum int64, log wrapper.Log) func() {
 				clusterName = info["cluster_name"].(string)
 			}
 			log.Errorf("syncResource cluster_name: %s", clusterName)
-			var targetClient wrapper.HttpClient
-			_targetClient, exists := targetClientMap.Load(clusterName)
-			if !exists {
-				clusterInfo := strings.Split(clusterName, "|")
-				if len(clusterInfo) != 4 {
-					log.Errorf("invalid cluster_name: %s", clusterName)
-					return true
-				}
-				port, err := strconv.Atoi(clusterInfo[1])
-				if err != nil {
-					log.Errorf("invalid port: %s", clusterInfo[1])
-					return true
-				}
 
-				serviceName := strings.ReplaceAll(clusterInfo[3], ".dns", "")
-				targetClient = wrapper.NewClusterClient(wrapper.DnsCluster{
-					Port:        int64(port),
-					ServiceName: serviceName,
-					Domain:      config.setting.targetHost,
-				})
-				log.Errorf("syncResource get s3 path: %s, %s, %d", config.setting.targetHost, serviceName, port)
-				log.Errorf("syncResource get s3 path: %s, %d", config.setting.targetHost, port)
-				targetClientMap.Store(clusterName, targetClient)
-			} else {
-				targetClient = _targetClient.(wrapper.HttpClient)
+			originClient, err := getOriginClient(clusterName, config.setting.originHost)
+			if err != nil {
+				log.Errorf("syncResource get origin client failed: %s", reqPath)
+				return true
 			}
-
-			err := targetClient.Get(reqPath, nil, func(statusCode int, responseHeaders http.Header, responseBody []byte) {
-				log.Errorf("syncResource get complete: %d, %s", statusCode, reqPath)
+			err = originClient.Get(reqPath, nil, func(statusCode int, responseHeaders http.Header, responseBody []byte) {
+				log.Errorf("syncResource origin resource get complete: %d, %s", statusCode, reqPath)
 				if statusCode != 200 {
 					return
 				}
 
-				realPath := getRealSavePath(reqPath)
-				putPath, err := util.GeneratePresignedURL(
-					config.setting.accessKey,
-					config.setting.secretKey,
-					"",
-					config.setting.region,
-					config.setting.host,
-					config.setting.bucket,
-					realPath,
-					"PUT",
-					3600*time.Second,
-					"",
-				)
-				log.Errorf("syncResource put s3 path: %s, %s, %s", reqPath, realPath, putPath)
+				s3SavePath := getRealSavePath(reqPath)
+				putPath, err := getS3PresignedURL(config, s3SavePath, "PUT", 3600*time.Second)
 				if err != nil {
 					log.Errorf("syncResource make s3 url failed: %v", err)
 					return
 				}
+				log.Errorf("syncResource put s3 path: %s, %s, %s", reqPath, s3SavePath, putPath)
 
 				headers := make([][2]string, 0)
 				headerData, exists := info["headers"]
 				if exists {
 					headers = headerData.([][2]string)
 				}
-				fmt.Print("headers: %v", headers)
-
 				err = config.client.Put(putPath, headers, responseBody, func(statusCode int, responseHeaders http.Header, responseBody []byte) {
 					log.Errorf("syncResource sync complete: %d, %s", statusCode, reqPath)
 				})
@@ -146,6 +108,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 	if config.setting.purgeReqMethod != "" && strings.ToLower(config.setting.purgeReqMethod) == strings.ToLower(ctx.Method()) {
 		return types.ActionContinue
 	}
+	reqPath := ctx.Path()
 
 	clusterName, err := proxywasm.GetProperty([]string{"cluster_name"})
 	if err != nil {
@@ -155,53 +118,39 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 	ctx.SetContext("cluster_name", string(clusterName))
 
 	//检测是否需要缓存，如果需要缓存，则将请求转发到s3
-	_pathCacheRule, err := getPathCacheRule(ctx.Path(), config.setting.pathCacheRules)
-	if err != nil {
+	_pathCacheRule, err := getPathCacheRule(reqPath, config.setting.pathCacheRules)
+	if err != nil || _pathCacheRule == nil {
 		log.Errorf("onHttpRequestHeaders get cache rule failed: %v", err)
 		ctx.SetContext("cache_enable", false)
 		return types.ActionContinue
 	}
-	if _pathCacheRule == nil {
-		ctx.SetContext("cache_enable", false)
-		return types.ActionContinue
-	}
-	log.Errorf("onHttpRequestHeaders get cache rule %s, %v, %v", ctx.Path(), _pathCacheRule, config.setting.pathCacheRules)
+	log.Errorf("onHttpRequestHeaders get cache rule %s, %v, %v", reqPath, _pathCacheRule, config.setting.pathCacheRules)
 	ctx.SetContext("cache_enable", _pathCacheRule.Enable)
 	if !_pathCacheRule.Enable {
 		return types.ActionContinue
 	}
 
-	realPath := ctx.Path()
-	_pathKeyCacheRule, err := getPathKeyCacheRule(realPath, config.setting.pathKeyCacheRules)
+	//根据规则重置请求地址
+	_pathKeyCacheRule, err := getPathKeyCacheRule(reqPath, config.setting.pathKeyCacheRules)
 	if err != nil {
 		log.Errorf("onHttpRequestHeaders get cache key rule failed: %v", err)
 	}
+	reqPathProcessPath := reqPath
 	if _pathKeyCacheRule != nil {
-		realPath = processPathByRule(realPath, _pathKeyCacheRule)
+		reqPathProcessPath = processPathByRule(reqPathProcessPath, _pathKeyCacheRule)
 	}
-	checkS3Path := getRealSavePath(realPath)
-	log.Errorf("onHttpRequestHeaders12 get cache key rule%s, %s, %v, %v", ctx.Path(), checkS3Path, _pathKeyCacheRule, config.setting.pathKeyCacheRules)
+	log.Errorf("onHttpRequestHeaders get cache key rule%s, %s, %v, %v", ctx.Path(), reqPathProcessPath, _pathKeyCacheRule, config.setting.pathKeyCacheRules)
 
-	checkExistsUrl, err := util.GeneratePresignedURL(
-		config.setting.accessKey,
-		config.setting.secretKey,
-		"",
-		config.setting.region,
-		config.setting.host,
-		config.setting.bucket,
-		checkS3Path,
-		"GET",
-		30*time.Second,
-		"",
-	)
+	ctx.SetContext("req_path", reqPathProcessPath)
+
+	s3SavePath := getRealSavePath(reqPathProcessPath)
+	checkS3PresignPath, err := getS3PresignedURL(config, s3SavePath, "GET", 30*time.Second)
 	if err != nil {
 		log.Errorf("onHttpRequestHeaders make s3 check url failed: %v", err)
 		return types.ActionContinue
 	}
-	ctx.SetContext("req_path", realPath)
-
-	log.Errorf("onHttpRequestHeaders check s3 path: %s, bucket: %s", realPath, config.setting.bucket)
-	err = config.client.Get(checkExistsUrl, nil, func(statusCode int, responseHeaders http.Header, responseBody []byte) {
+	log.Errorf("onHttpRequestHeaders check s3 path: %s, %s, bucket: %s", reqPathProcessPath, s3SavePath, config.setting.bucket)
+	err = config.client.Get(checkS3PresignPath, nil, func(statusCode int, responseHeaders http.Header, responseBody []byte) {
 		exists := false
 		if statusCode == 200 {
 			exists = true
@@ -210,7 +159,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 		if modifiedAt == "" {
 			exists = false
 		}
-		log.Errorf("onHttpRequestHeaders check s3 complete: %s, %d, %s", realPath, statusCode, modifiedAt)
+		log.Errorf("onHttpRequestHeaders check s3 complete: %s, %d, %s", reqPathProcessPath, statusCode, modifiedAt)
 
 		if exists && _pathCacheRule.CacheTtl > 0 {
 			datetime, err := time.Parse(time.RFC1123, modifiedAt)
@@ -226,30 +175,38 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 		}
 		if exists {
 			ctx.SetContext("s3_file_exists", true)
-			log.Errorf("onHttpRequestHeaders s3 file exists: %s", realPath)
+			log.Errorf("onHttpRequestHeaders s3 file exists: %s", reqPathProcessPath)
 
-			headers := make([][2]string, 0)
-			for key, item := range responseHeaders {
-				headers = append(headers, [2]string{key, item[0]})
-			}
-			err = proxywasm.SendHttpResponse(uint32(statusCode), headers, responseBody, -1)
+			responseS3Resource(statusCode, responseHeaders, responseBody, log)
+			return
+		} else {
+			//检测源中是否存在，如果不存在忽略缓存策略，直接返回 s3的资源
+			originClient, err := getOriginClient(string(clusterName), config.setting.originHost)
 			if err != nil {
-				log.Errorf("onHttpRequestHeaders send response failed %s", err.Error())
+				log.Errorf("onHttpRequestHeaders get origin client failed: %s, %v", reqPathProcessPath, err)
+
+				_ = proxywasm.ResumeHttpRequest()
+				return
 			}
 
-			return
-		}
+			err = originClient.Head(reqPathProcessPath, nil, func(originStatusCode int, originResponseHeaders http.Header, originResponseBody []byte) {
+				if originStatusCode != 200 && statusCode == 200 {
+					ctx.SetContext("s3_file_exists", true)
 
-		log.Errorf("onHttpRequestHeaders check s3 complete1: %s, %d, %s", realPath, statusCode, modifiedAt)
+					responseS3Resource(statusCode, responseHeaders, responseBody, log)
+					return
+				}
 
-		err = proxywasm.ResumeHttpRequest()
-		if err != nil {
-			log.Errorf("onHttpRequestHeaders resume request failed %s", err.Error())
-			return
+				_ = proxywasm.ResumeHttpRequest()
+			})
+			if err != nil {
+				_ = proxywasm.ResumeHttpRequest()
+				return
+			}
 		}
 	}, 30000)
 	if err != nil {
-		log.Errorf("onHttpRequestHeaders check s3 err: %s, %v", realPath, err)
+		log.Errorf("onHttpRequestHeaders check s3 err: %s, %v", reqPathProcessPath, err)
 		return types.ActionContinue
 	}
 
@@ -284,13 +241,12 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wra
 				headers = append(headers, [2]string{"Content-Type", contentType})
 			}
 
-			log.Errorf("onHttpResponseHeaders sync complete %s", reqPath)
-
 			syncResourceMap.Store(reqPath, map[string]interface{}{
 				"headers":      headers,
 				"cluster_name": ctx.GetStringContext("cluster_name", ""),
 				"config":       config,
 			})
+			log.Errorf("onHttpResponseHeaders sync push %s", reqPath)
 		}
 	}
 

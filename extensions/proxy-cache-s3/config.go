@@ -5,12 +5,14 @@ import (
 	"encoding/hex"
 	"fmt"
 	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
+	"github.com/donknap/proxy-cache-s3/util"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"github.com/tidwall/gjson"
 	"net/url"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 type pathCacheRule struct {
@@ -48,6 +50,7 @@ type W7ProxyCache struct {
 		syncNum      int64
 
 		targetHost string
+		originHost string
 	}
 }
 
@@ -83,7 +86,7 @@ func parseConfig(data gjson.Result, config *W7ProxyCache, log wrapper.Log) error
 	}
 	if data.Get("rewrite_host").Exists() {
 		value := data.Get("rewrite_host").String()
-		config.setting.targetHost = strings.Replace(value, " ", "", -1)
+		config.setting.originHost = strings.Replace(value, " ", "", -1)
 	}
 	if data.Get("sync_tick_step").Exists() {
 		config.setting.syncTickStep = data.Get("sync_tick_step").Int()
@@ -97,7 +100,7 @@ func parseConfig(data gjson.Result, config *W7ProxyCache, log wrapper.Log) error
 		config.setting.region == "" ||
 		config.setting.bucket == "" ||
 		config.setting.host == "" ||
-		config.setting.targetHost == "" {
+		config.setting.originHost == "" {
 		log.Error("s3 setting is empty")
 		return types.ErrorStatusBadArgument
 	}
@@ -346,4 +349,19 @@ func getRealSavePath(originPath string) string {
 	}
 
 	return originPath
+}
+
+func getS3PresignedURL(config W7ProxyCache, path string, method string, expires time.Duration) (string, error) {
+	return util.GeneratePresignedURL(
+		config.setting.accessKey,
+		config.setting.secretKey,
+		"",
+		config.setting.region,
+		config.setting.host,
+		config.setting.bucket,
+		path,
+		method,
+		expires,
+		"",
+	)
 }
