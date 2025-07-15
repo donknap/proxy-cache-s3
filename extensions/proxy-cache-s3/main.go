@@ -179,7 +179,7 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 
 			responseS3Resource(statusCode, responseHeaders, responseBody, log)
 			return
-		} else {
+		} else if statusCode == 200 {
 			//检测源中是否存在，如果不存在忽略缓存策略，直接返回 s3的资源
 			originClient, err := getOriginClient(string(clusterName), config.setting.originHost)
 			if err != nil {
@@ -190,7 +190,8 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 			}
 
 			err = originClient.Head(reqPathProcessPath, nil, func(originStatusCode int, originResponseHeaders http.Header, originResponseBody []byte) {
-				if originStatusCode != 200 && statusCode == 200 {
+				log.Errorf("onHttpRequestHeaders s3 origin check: %s, %d, %s", reqPathProcessPath, originStatusCode)
+				if originStatusCode != 200 {
 					ctx.SetContext("s3_file_exists", true)
 
 					responseS3Resource(statusCode, responseHeaders, responseBody, log)
@@ -203,7 +204,10 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 				_ = proxywasm.ResumeHttpRequest()
 				return
 			}
+			return
 		}
+		_ = proxywasm.ResumeHttpRequest()
+
 	}, 30000)
 	if err != nil {
 		log.Errorf("onHttpRequestHeaders check s3 err: %s, %v", reqPathProcessPath, err)
@@ -221,8 +225,8 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wra
 
 	reqPath := ctx.GetStringContext("req_path", "")
 
-	log.Errorf("onHttpResponseHeaders begin %s", reqPath)
 	status, err := proxywasm.GetHttpResponseHeader(":status")
+	log.Errorf("onHttpResponseHeaders begin %s, %s", reqPath, status)
 	if err != nil {
 		log.Errorf("onHttpResponseHeaders get status failed %s", err.Error())
 		return types.ActionContinue
