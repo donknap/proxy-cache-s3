@@ -12,6 +12,50 @@ import (
 
 var originClientMap = sync.Map{}
 
+func SliceToHeader(slice [][2]string) http.Header {
+	header := make(http.Header)
+	for _, pair := range slice {
+		key := pair[0]
+		value := pair[1]
+		header.Add(key, value)
+	}
+	return header
+}
+
+func HeaderToSlice(header http.Header) [][2]string {
+	slice := make([][2]string, 0, len(header))
+	for key, values := range header {
+		for _, value := range values {
+			slice = append(slice, [2]string{key, value})
+		}
+	}
+	return slice
+}
+
+func GetOriginalRequestHeaders() http.Header {
+	originalHeaders, _ := proxywasm.GetHttpRequestHeaders()
+	return SliceToHeader(originalHeaders)
+}
+
+func OverwriteRequestHostHeader(headers http.Header, host string) {
+	//if originHost, err := proxywasm.GetHttpRequestHeader(":authority"); err == nil {
+	//	headers.Set("X-ENVOY-ORIGINAL-HOST", originHost)
+	//}
+	headers.Set(":authority", host)
+}
+
+func OverwriteRequestPathHeader(headers http.Header, path string) {
+	//if originPath, err := proxywasm.GetHttpRequestHeader(":path"); err == nil {
+	//	headers.Set("X-ENVOY-ORIGINAL-PATH", originPath)
+	//}
+	headers.Set(":path", path)
+}
+
+func ReplaceRequestHeaders(headers http.Header) {
+	modifiedHeaders := HeaderToSlice(headers)
+	_ = proxywasm.ReplaceHttpRequestHeaders(modifiedHeaders)
+}
+
 func getOriginClient(clusterName string, originHost string) (wrapper.HttpClient, error) {
 	_originClient, exists := originClientMap.Load(clusterName)
 	if !exists {

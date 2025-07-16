@@ -5,6 +5,7 @@ import (
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -176,9 +177,24 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 		if exists {
 			ctx.SetContext("s3_file_exists", true)
 			log.Errorf("onHttpRequestHeaders s3 file exists: %s", reqPathProcessPath)
+			hs, _ := proxywasm.GetHttpRequestHeaders()
+			log.Errorf("onHttpResponseHeaders1 begin %s, %v", reqPath, hs)
 
-			responseS3Resource(statusCode, responseHeaders, responseBody, log)
-			return
+			reqHeaders := GetOriginalRequestHeaders()
+			getS3PresignPath, _ := getS3PresignedURL(config, s3SavePath, "GET", 360*time.Second)
+			u, err := url.Parse(getS3PresignPath)
+			if err == nil {
+				OverwriteRequestHostHeader(reqHeaders, u.Host)
+				OverwriteRequestPathHeader(reqHeaders, u.RequestURI())
+			}
+
+			ReplaceRequestHeaders(reqHeaders)
+
+			hs, _ = proxywasm.GetHttpRequestHeaders()
+			log.Errorf("onHttpResponseHeaders begin %s, %v", reqPath, hs)
+
+			//responseS3Resource(statusCode, responseHeaders, responseBody, log)
+			//return
 		} else if statusCode == 200 {
 			//检测源中是否存在，如果不存在忽略缓存策略，直接返回 s3的资源
 			originClient, err := getOriginClient(string(clusterName), config.setting.originHost)
@@ -226,7 +242,8 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wra
 	reqPath := ctx.GetStringContext("req_path", "")
 
 	status, err := proxywasm.GetHttpResponseHeader(":status")
-	log.Errorf("onHttpResponseHeaders begin %s, %s", reqPath, status)
+	headers, _ := proxywasm.GetHttpResponseHeaders()
+	log.Errorf("onHttpResponseHeaders begin %s, %s, %v", reqPath, status, headers)
 	if err != nil {
 		log.Errorf("onHttpResponseHeaders get status failed %s", err.Error())
 		return types.ActionContinue
