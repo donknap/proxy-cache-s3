@@ -5,9 +5,11 @@ import (
 	"github.com/alibaba/higress/plugins/wasm-go/pkg/wrapper"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 var originClientMap = sync.Map{}
@@ -80,13 +82,21 @@ func getOriginClient(clusterName string, originHost string) (wrapper.HttpClient,
 	return _originClient.(wrapper.HttpClient), nil
 }
 
-func responseS3Resource(s3StatusCode int, s3ResponseHeaders http.Header, s3ResponseBody []byte, log wrapper.Log) {
-	headers := make([][2]string, 0)
-	for key, item := range s3ResponseHeaders {
-		headers = append(headers, [2]string{key, item[0]})
-	}
-	err := proxywasm.SendHttpResponse(uint32(s3StatusCode), headers, s3ResponseBody, -1)
+func responseS3Resource(config W7ProxyCache, s3SavePath string) error {
+	tmpConfig := config
+	tmpConfig.setting.host = config.setting.originHost
+	getS3PresignPath, err := getS3PresignedURL(tmpConfig, s3SavePath, "GET", 360*time.Second)
+	u, err := url.Parse(getS3PresignPath)
 	if err != nil {
-		log.Errorf("onHttpRequestHeaders send response failed %s", err.Error())
+		return err
 	}
+
+	reqHeaders := GetOriginalRequestHeaders()
+	OverwriteRequestPathHeader(reqHeaders, u.RequestURI())
+	reqHeaders.Set("User-Agent", "test")
+	ReplaceRequestHeaders(reqHeaders)
+
+	wrapper.Log{}.Errorf("onHttpRequestHeaders s3 file exists response: %s", s3SavePath)
+
+	return nil
 }

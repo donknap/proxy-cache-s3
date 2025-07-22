@@ -5,7 +5,6 @@ import (
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm"
 	"github.com/higress-group/proxy-wasm-go-sdk/proxywasm/types"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -145,13 +144,13 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 	ctx.SetContext("req_path", reqPathProcessPath)
 
 	s3SavePath := getRealSavePath(reqPathProcessPath)
-	checkS3PresignPath, err := getS3PresignedURL(config, s3SavePath, "GET", 30*time.Second)
+	checkS3PresignPath, err := getS3PresignedURL(config, s3SavePath, "HEAD", 30*time.Second)
 	if err != nil {
 		log.Errorf("onHttpRequestHeaders make s3 check url failed: %v", err)
 		return types.ActionContinue
 	}
 	log.Errorf("onHttpRequestHeaders check s3 path: %s, %s, bucket: %s", reqPathProcessPath, s3SavePath, config.setting.bucket)
-	err = config.client.Get(checkS3PresignPath, nil, func(statusCode int, responseHeaders http.Header, responseBody []byte) {
+	err = config.client.Head(checkS3PresignPath, nil, func(statusCode int, responseHeaders http.Header, responseBody []byte) {
 		exists := false
 		if statusCode == 200 {
 			exists = true
@@ -177,50 +176,37 @@ func onHttpRequestHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wrap
 		if exists {
 			ctx.SetContext("s3_file_exists", true)
 			log.Errorf("onHttpRequestHeaders s3 file exists: %s", reqPathProcessPath)
-			hs, _ := proxywasm.GetHttpRequestHeaders()
-			log.Errorf("onHttpResponseHeaders1 begin %s, %v", reqPath, hs)
 
-			reqHeaders := GetOriginalRequestHeaders()
-			getS3PresignPath, _ := getS3PresignedURL(config, s3SavePath, "GET", 360*time.Second)
-			u, err := url.Parse(getS3PresignPath)
-			if err == nil {
-				OverwriteRequestHostHeader(reqHeaders, u.Host)
-				OverwriteRequestPathHeader(reqHeaders, u.RequestURI())
+			err = responseS3Resource(config, s3SavePath)
+			if err != nil {
+				log.Errorf("onHttpRequestHeaders s3 exists respionse failed: %v, %s", err, reqPath)
+				ctx.SetContext("s3_file_exists", false)
 			}
-
-			ReplaceRequestHeaders(reqHeaders)
-
-			hs, _ = proxywasm.GetHttpRequestHeaders()
-			log.Errorf("onHttpResponseHeaders begin %s, %v", reqPath, hs)
-
-			//responseS3Resource(statusCode, responseHeaders, responseBody, log)
-			//return
 		} else if statusCode == 200 {
 			//检测源中是否存在，如果不存在忽略缓存策略，直接返回 s3的资源
 			originClient, err := getOriginClient(string(clusterName), config.setting.originHost)
-			if err != nil {
-				log.Errorf("onHttpRequestHeaders get origin client failed: %s, %v", reqPathProcessPath, err)
+			if err == nil {
+				err = originClient.Head(reqPathProcessPath, nil, func(originStatusCode int, originResponseHeaders http.Header, originResponseBody []byte) {
+					log.Errorf("onHttpRequestHeaders s3 origin check: %s, %d, %s", reqPathProcessPath, originStatusCode)
+					if originStatusCode != 200 {
+						ctx.SetContext("s3_file_exists", true)
 
-				_ = proxywasm.ResumeHttpRequest()
-				return
-			}
+						err = responseS3Resource(config, s3SavePath)
+						if err != nil {
+							log.Errorf("onHttpRequestHeaders s3 exists respionse failed: %v, %s", err, reqPath)
+							ctx.SetContext("s3_file_exists", false)
+						}
+					}
 
-			err = originClient.Head(reqPathProcessPath, nil, func(originStatusCode int, originResponseHeaders http.Header, originResponseBody []byte) {
-				log.Errorf("onHttpRequestHeaders s3 origin check: %s, %d, %s", reqPathProcessPath, originStatusCode)
-				if originStatusCode != 200 {
-					ctx.SetContext("s3_file_exists", true)
-
-					responseS3Resource(statusCode, responseHeaders, responseBody, log)
+					_ = proxywasm.ResumeHttpRequest()
+				})
+				if err == nil {
 					return
 				}
-
-				_ = proxywasm.ResumeHttpRequest()
-			})
-			if err != nil {
-				_ = proxywasm.ResumeHttpRequest()
-				return
 			}
-			return
+			if err != nil {
+				log.Errorf("onHttpRequestHeaders s3 origin check failed: %v, %s", err, reqPath)
+			}
 		}
 		_ = proxywasm.ResumeHttpRequest()
 
@@ -242,8 +228,7 @@ func onHttpResponseHeaders(ctx wrapper.HttpContext, config W7ProxyCache, log wra
 	reqPath := ctx.GetStringContext("req_path", "")
 
 	status, err := proxywasm.GetHttpResponseHeader(":status")
-	headers, _ := proxywasm.GetHttpResponseHeaders()
-	log.Errorf("onHttpResponseHeaders begin %s, %s, %v", reqPath, status, headers)
+	log.Errorf("onHttpResponseHeaders begin %s, %s", reqPath, status)
 	if err != nil {
 		log.Errorf("onHttpResponseHeaders get status failed %s", err.Error())
 		return types.ActionContinue
